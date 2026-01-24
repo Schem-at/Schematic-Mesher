@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Schematic Mesher Test</title>
+  <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.3.0/model-viewer.min.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background: #16213e;
+      padding: 1rem 2rem;
+      border-bottom: 1px solid #0f3460;
+    }
+
+    header h1 {
+      font-size: 1.5rem;
+      font-weight: 500;
+    }
+
+    main {
+      display: flex;
+      flex: 1;
+      gap: 1rem;
+      padding: 1rem;
+    }
+
+    .panel {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 1rem;
+      border: 1px solid #0f3460;
+    }
+
+    .controls {
+      width: 400px;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .viewer-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    model-viewer {
+      width: 100%;
+      flex: 1;
+      min-height: 400px;
+      background: #0a0a14;
+      border-radius: 8px;
+    }
+
+    .section {
+      margin-bottom: 1rem;
+    }
+
+    .section-title {
+      font-size: 0.875rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: #888;
+      margin-bottom: 0.5rem;
+    }
+
+    label {
+      display: block;
+      font-size: 0.875rem;
+      margin-bottom: 0.25rem;
+      color: #aaa;
+    }
+
+    input[type="text"],
+    input[type="file"],
+    textarea,
+    select {
+      width: 100%;
+      padding: 0.5rem;
+      background: #0f3460;
+      border: 1px solid #1a4a7a;
+      border-radius: 4px;
+      color: #fff;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 0.875rem;
+    }
+
+    input[type="file"] {
+      padding: 0.375rem;
+    }
+
+    textarea {
+      min-height: 150px;
+      resize: vertical;
+    }
+
+    input:focus,
+    textarea:focus,
+    select:focus {
+      outline: none;
+      border-color: #4a9eff;
+    }
+
+    button {
+      background: #4a9eff;
+      color: #fff;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 4px;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button:hover {
+      background: #3a8eef;
+    }
+
+    button:disabled {
+      background: #444;
+      cursor: not-allowed;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+
+    .tab {
+      padding: 0.5rem 1rem;
+      background: transparent;
+      border: 1px solid #0f3460;
+      color: #888;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+
+    .tab.active {
+      background: #0f3460;
+      color: #fff;
+    }
+
+    .tab-content {
+      display: none;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    .status {
+      padding: 0.5rem;
+      border-radius: 4px;
+      font-size: 0.875rem;
+      margin-top: 0.5rem;
+    }
+
+    .status.error {
+      background: #3d1515;
+      color: #ff6b6b;
+    }
+
+    .status.success {
+      background: #153d15;
+      color: #6bff6b;
+    }
+
+    .status.info {
+      background: #15293d;
+      color: #6bb3ff;
+    }
+
+    .examples {
+      font-size: 0.75rem;
+      color: #666;
+      margin-top: 0.5rem;
+    }
+
+    .examples code {
+      display: block;
+      padding: 0.25rem;
+      margin-top: 0.25rem;
+      background: #0a1525;
+      border-radius: 2px;
+      cursor: pointer;
+    }
+
+    .examples code:hover {
+      background: #0f3460;
+    }
+
+    .stats {
+      font-size: 0.75rem;
+      color: #888;
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Schematic Mesher Test</h1>
+  </header>
+
+  <main>
+    <div class="controls panel">
+      <div class="section">
+        <div class="section-title">Resource Pack</div>
+        <label for="resourcePack">Load resource pack (.zip)</label>
+        <input type="file" id="resourcePack" accept=".zip">
+        <div id="packStatus" class="status info">No resource pack loaded</div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Input Mode</div>
+        <div class="tabs">
+          <button class="tab active" data-tab="single">Single Block</button>
+          <button class="tab" data-tab="json">JSON</button>
+        </div>
+
+        <div id="tab-single" class="tab-content active">
+          <label for="blockInput">Block (with state)</label>
+          <input type="text" id="blockInput" placeholder="minecraft:stone" value="minecraft:stone">
+          <div class="examples">
+            Examples (click to use):
+            <code>minecraft:stone</code>
+            <code>minecraft:grass_block[snowy=false]</code>
+            <code>minecraft:oak_stairs[facing=north,half=bottom]</code>
+            <code>minecraft:redstone_wire[power=15,north=side,south=side]</code>
+            <code>minecraft:oak_fence[north=true,south=true]</code>
+          </div>
+        </div>
+
+        <div id="tab-json" class="tab-content">
+          <label for="jsonInput">Blocks JSON</label>
+          <textarea id="jsonInput" placeholder='{"blocks": [{"x": 0, "y": 0, "z": 0, "name": "stone"}]}'>{
+  "blocks": [
+    {"x": 0, "y": 0, "z": 0, "name": "minecraft:stone"},
+    {"x": 1, "y": 0, "z": 0, "name": "minecraft:dirt"},
+    {"x": 0, "y": 1, "z": 0, "name": "minecraft:grass_block"}
+  ]
+}</textarea>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">Options</div>
+        <label>
+          <input type="checkbox" id="optCulling" checked> Face culling
+        </label>
+        <label>
+          <input type="checkbox" id="optAO" checked> Ambient occlusion
+        </label>
+        <label for="optBiome">Biome</label>
+        <select id="optBiome">
+          <option value="">Default</option>
+          <option value="plains">Plains</option>
+          <option value="forest">Forest</option>
+          <option value="swamp">Swamp</option>
+          <option value="jungle">Jungle</option>
+          <option value="taiga">Taiga</option>
+          <option value="desert">Desert</option>
+          <option value="savanna">Savanna</option>
+          <option value="badlands">Badlands</option>
+        </select>
+      </div>
+
+      <button id="meshBtn" disabled>Generate Mesh</button>
+      <div id="meshStatus" class="status info">Load a resource pack to begin</div>
+      <div id="meshStats" class="stats"></div>
+    </div>
+
+    <div class="viewer-container panel">
+      <model-viewer
+        id="viewer"
+        camera-controls
+        auto-rotate
+        shadow-intensity="1"
+        environment-image="neutral"
+        exposure="1"
+      >
+        <div slot="poster" style="display: flex; align-items: center; justify-content: center; height: 100%; color: #666;">
+          Generate a mesh to view it here
+        </div>
+      </model-viewer>
+    </div>
+  </main>
+
+  <script type="module">
+    // State
+    let resourcePack = null;
+    let wasmModule = null;
+
+    // Elements
+    const resourcePackInput = document.getElementById('resourcePack');
+    const packStatus = document.getElementById('packStatus');
+    const blockInput = document.getElementById('blockInput');
+    const jsonInput = document.getElementById('jsonInput');
+    const meshBtn = document.getElementById('meshBtn');
+    const meshStatus = document.getElementById('meshStatus');
+    const meshStats = document.getElementById('meshStats');
+    const viewer = document.getElementById('viewer');
+    const tabs = document.querySelectorAll('.tab');
+    const tabContents = document.querySelectorAll('.tab-content');
+    const optCulling = document.getElementById('optCulling');
+    const optAO = document.getElementById('optAO');
+    const optBiome = document.getElementById('optBiome');
+
+    // Tab switching
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        tabs.forEach(t => t.classList.remove('active'));
+        tabContents.forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(`tab-${tab.dataset.tab}`).classList.add('active');
+      });
+    });
+
+    // Example click handlers
+    document.querySelectorAll('.examples code').forEach(code => {
+      code.addEventListener('click', () => {
+        blockInput.value = code.textContent;
+      });
+    });
+
+    // Load WASM module
+    async function loadWasm() {
+      try {
+        meshStatus.textContent = 'Loading WASM module...';
+        meshStatus.className = 'status info';
+
+        const wasm = await import('/pkg/schematic_mesher.js');
+        await wasm.default();
+        wasmModule = wasm;
+
+        meshStatus.textContent = 'WASM loaded. Load a resource pack to begin.';
+        return true;
+      } catch (e) {
+        console.error('Failed to load WASM:', e);
+        meshStatus.textContent = `WASM not available: ${e.message}. Build with: wasm-pack build --target web --features wasm`;
+        meshStatus.className = 'status error';
+        return false;
+      }
+    }
+
+    // Load resource pack
+    resourcePackInput.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      packStatus.textContent = 'Loading resource pack...';
+      packStatus.className = 'status info';
+
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+
+        resourcePack = new wasmModule.ResourcePackHandle(bytes);
+
+        packStatus.textContent = `Loaded: ${resourcePack.blockstate_count} blockstates, ${resourcePack.model_count} models, ${resourcePack.texture_count} textures`;
+        packStatus.className = 'status success';
+        meshBtn.disabled = false;
+        meshStatus.textContent = 'Ready to generate mesh';
+        meshStatus.className = 'status info';
+      } catch (e) {
+        console.error('Failed to load resource pack:', e);
+        packStatus.textContent = `Error: ${e.message}`;
+        packStatus.className = 'status error';
+        resourcePack = null;
+        meshBtn.disabled = true;
+      }
+    });
+
+    // Parse block string like "minecraft:stone[facing=north,half=bottom]"
+    function parseBlockString(str) {
+      const match = str.match(/^([a-z_:]+)(?:\[(.+)\])?$/);
+      if (!match) {
+        return { name: str, properties: {} };
+      }
+
+      const name = match[1].includes(':') ? match[1] : `minecraft:${match[1]}`;
+      const properties = {};
+
+      if (match[2]) {
+        match[2].split(',').forEach(prop => {
+          const [key, value] = prop.split('=');
+          if (key && value) {
+            properties[key.trim()] = value.trim();
+          }
+        });
+      }
+
+      return { name, properties };
+    }
+
+    // Generate mesh
+    meshBtn.addEventListener('click', async () => {
+      if (!resourcePack || !wasmModule) return;
+
+      meshBtn.disabled = true;
+      meshStatus.textContent = 'Generating mesh...';
+      meshStatus.className = 'status info';
+      meshStats.textContent = '';
+
+      try {
+        const activeTab = document.querySelector('.tab.active').dataset.tab;
+        let result;
+
+        // Create options
+        const options = new wasmModule.MesherOptions();
+        options.cull_hidden_faces = optCulling.checked;
+        options.ambient_occlusion = optAO.checked;
+        if (optBiome.value) {
+          options.biome = optBiome.value;
+        }
+
+        if (activeTab === 'single') {
+          const parsed = parseBlockString(blockInput.value.trim());
+
+          // For single block with properties, we need to use JSON input
+          if (Object.keys(parsed.properties).length > 0) {
+            const json = JSON.stringify({
+              blocks: [{
+                x: 0, y: 0, z: 0,
+                name: parsed.name,
+                properties: parsed.properties
+              }]
+            });
+            result = wasmModule.mesh_blocks_json(resourcePack, json, options);
+          } else {
+            result = wasmModule.mesh_block(resourcePack, parsed.name, options);
+          }
+        } else {
+          const json = jsonInput.value;
+          result = wasmModule.mesh_blocks_json(resourcePack, json, options);
+        }
+
+        // Create blob URL for GLB
+        const glbBlob = new Blob([result.glb_data], { type: 'model/gltf-binary' });
+        const glbUrl = URL.createObjectURL(glbBlob);
+
+        // Update viewer
+        viewer.src = glbUrl;
+
+        meshStatus.textContent = 'Mesh generated successfully';
+        meshStatus.className = 'status success';
+        meshStats.textContent = `Vertices: ${result.vertex_count}, Triangles: ${result.triangle_count}${result.has_transparency ? ' (has transparency)' : ''}`;
+
+      } catch (e) {
+        console.error('Mesh generation failed:', e);
+        meshStatus.textContent = `Error: ${e.message}`;
+        meshStatus.className = 'status error';
+      }
+
+      meshBtn.disabled = false;
+    });
+
+    // Initialize
+    loadWasm();
+  </script>
+</body>
+</html>
