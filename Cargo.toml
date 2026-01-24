@@ -8,6 +8,8 @@ repository = "https://github.com/Schem-at/Schematic-Mesher"
 keywords = ["minecraft", "mesh", "gltf", "voxel", "schematic"]
 categories = ["rendering", "game-development"]
 readme = "README.md"
+authors = ["Nano nano@schem.at"]
+exclude = ["web/", "examples/", "minecraft-src/"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -51,14 +53,4 @@ js-sys = { version = "=0.3.76", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 
 [dev-dependencies]
-nucleation = { path = "/Users/harrison/RustroverProjects/Nucleation" }
 tempfile = "3.0"
-chrono = "0.4"
-
-[[example]]
-name = "mesh_schematic"
-path = "examples/mesh_schematic.rs"
-
-[[example]]
-name = "test_all_blocks"
-path = "examples/test_all_blocks.rs"
