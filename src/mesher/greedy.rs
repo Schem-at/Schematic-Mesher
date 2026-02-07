@@ -344,13 +344,20 @@ fn merge_layer(
         v_max = v_max.max(v);
     }
 
-    let mut visited: HashMap<(i32, i32), bool> = HashMap::new();
+    let grid_width = (u_max - u_min + 1) as usize;
+    let grid_height = (v_max - v_min + 1) as usize;
+    let mut visited = vec![false; grid_width * grid_height];
     let mut result = Vec::new();
+
+    // Inline helper to index into visited array
+    let idx = |u: i32, v: i32| -> usize {
+        (u - u_min) as usize + (v - v_min) as usize * grid_width
+    };
 
     // Scan in v-major order (top to bottom, left to right)
     for v in v_min..=v_max {
         for u in u_min..=u_max {
-            if *visited.get(&(u, v)).unwrap_or(&false) {
+            if visited[idx(u, v)] {
                 continue;
             }
 
@@ -365,11 +372,10 @@ fn merge_layer(
             // Expand right (along u)
             let mut width = 1;
             while u + width <= u_max {
-                let next = (u + width, v);
-                if *visited.get(&next).unwrap_or(&false) {
+                if visited[idx(u + width, v)] {
                     break;
                 }
-                match grid.get(&next) {
+                match grid.get(&(u + width, v)) {
                     Some(f) if f.key == *key => width += 1,
                     _ => break,
                 }
@@ -380,11 +386,10 @@ fn merge_layer(
             'outer: while v + height <= v_max {
                 // Check entire row
                 for du in 0..width {
-                    let next = (u + du, v + height);
-                    if *visited.get(&next).unwrap_or(&false) {
+                    if visited[idx(u + du, v + height)] {
                         break 'outer;
                     }
-                    match grid.get(&next) {
+                    match grid.get(&(u + du, v + height)) {
                         Some(f) if f.key == *key => {}
                         _ => break 'outer,
                     }
@@ -395,7 +400,7 @@ fn merge_layer(
             // Mark visited
             for dv in 0..height {
                 for du in 0..width {
-                    visited.insert((u + du, v + dv), true);
+                    visited[idx(u + du, v + dv)] = true;
                 }
             }
 

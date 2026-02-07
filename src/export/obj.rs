@@ -11,15 +11,17 @@ use std::fmt::Write;
 /// Returns (obj_content, mtl_content) as strings.
 /// Greedy materials get separate MTL entries referencing individual texture files.
 pub fn export_obj(output: &MesherOutput, name: &str) -> Result<(String, String)> {
-    let mut obj = String::new();
-    let mut mtl = String::new();
-
     // Combine atlas-based meshes
     let mut atlas_mesh = output.opaque_mesh.clone();
     atlas_mesh.merge(&output.transparent_mesh);
 
     let total_verts = output.total_vertices();
     let total_tris = output.total_triangles();
+
+    // Pre-size buffers: ~60 bytes per vertex line (v/vt/vn) × 3 + ~40 per face
+    let obj_capacity = 256 + total_verts * 180 + total_tris * 40;
+    let mut obj = String::with_capacity(obj_capacity);
+    let mut mtl = String::with_capacity(512);
 
     // OBJ header
     writeln!(obj, "# Schematic Mesher OBJ Export").unwrap();

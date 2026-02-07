@@ -38,7 +38,13 @@ pub fn export_usda(output: &MesherOutput) -> Result<UsdaExport> {
     }
 
     let atlas_png = output.atlas.to_png()?;
-    let mut usda = String::new();
+
+    // Pre-size the output buffer: ~200 bytes per vertex (multiple arrays) + ~10 per index
+    let vert_count = output.total_vertices();
+    let idx_count = output.opaque_mesh.indices.len() + output.transparent_mesh.indices.len()
+        + output.greedy_materials.iter().map(|gm| gm.opaque_mesh.indices.len() + gm.transparent_mesh.indices.len()).sum::<usize>();
+    let estimated_size = 2048 + vert_count * 200 + idx_count * 10;
+    let mut usda = String::with_capacity(estimated_size);
 
     // Header
     writeln!(usda, "#usda 1.0").unwrap();
@@ -265,70 +271,64 @@ fn write_material(usda: &mut String, name: &str, texture_path: &str, wrap: &str,
     writeln!(usda, "    }}\n").unwrap();
 }
 
+/// Write a comma-separated array inline, streaming values directly to the buffer.
+fn write_array_inline<T, F>(usda: &mut String, items: &[T], mut fmt: F)
+where
+    F: FnMut(&T, &mut String),
+{
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            usda.push_str(", ");
+        }
+        fmt(item, usda);
+    }
+}
+
 /// Write a Mesh prim with positions, normals, UVs, vertex colors, and material binding.
 fn write_mesh_prim(usda: &mut String, name: &str, mesh: &Mesh, material: &str) {
     writeln!(usda, "    def Mesh \"{}\"", name).unwrap();
     writeln!(usda, "    {{").unwrap();
 
-    // Face vertex counts — all triangles
+    // Face vertex counts — all triangles (stream "3" values directly)
     let tri_count = mesh.triangle_count();
-    let counts: Vec<String> = std::iter::repeat("3".to_string()).take(tri_count).collect();
-    writeln!(
-        usda,
-        "        int[] faceVertexCounts = [{}]",
-        counts.join(", ")
-    )
-    .unwrap();
+    write!(usda, "        int[] faceVertexCounts = [").unwrap();
+    for i in 0..tri_count {
+        if i > 0 {
+            usda.push_str(", ");
+        }
+        usda.push('3');
+    }
+    writeln!(usda, "]").unwrap();
 
     // Face vertex indices
-    let indices: Vec<String> = mesh.indices.iter().map(|i| i.to_string()).collect();
-    writeln!(
-        usda,
-        "        int[] faceVertexIndices = [{}]",
-        indices.join(", ")
-    )
-    .unwrap();
+    write!(usda, "        int[] faceVertexIndices = [").unwrap();
+    write_array_inline(usda, &mesh.indices, |i, s| {
+        write!(s, "{}", i).unwrap();
+    });
+    writeln!(usda, "]").unwrap();
 
     // Points
-    let points: Vec<String> = mesh
-        .vertices
-        .iter()
-        .map(|v| format!("({}, {}, {})", v.position[0], v.position[1], v.position[2]))
-        .collect();
-    writeln!(
-        usda,
-        "        point3f[] points = [{}]",
-        points.join(", ")
-    )
-    .unwrap();
+    write!(usda, "        point3f[] points = [").unwrap();
+    write_array_inline(usda, &mesh.vertices, |v, s| {
+        write!(s, "({}, {}, {})", v.position[0], v.position[1], v.position[2]).unwrap();
+    });
+    writeln!(usda, "]").unwrap();
 
     // Normals (vertex interpolation)
-    let normals: Vec<String> = mesh
-        .vertices
-        .iter()
-        .map(|v| format!("({}, {}, {})", v.normal[0], v.normal[1], v.normal[2]))
-        .collect();
-    writeln!(
-        usda,
-        "        normal3f[] normals = [{}] (",
-        normals.join(", ")
-    )
-    .unwrap();
+    write!(usda, "        normal3f[] normals = [").unwrap();
+    write_array_inline(usda, &mesh.vertices, |v, s| {
+        write!(s, "({}, {}, {})", v.normal[0], v.normal[1], v.normal[2]).unwrap();
+    });
+    writeln!(usda, "] (").unwrap();
     writeln!(usda, "            interpolation = \"vertex\"").unwrap();
     writeln!(usda, "        )").unwrap();
 
     // UVs (vertex interpolation)
-    let uvs: Vec<String> = mesh
-        .vertices
-        .iter()
-        .map(|v| format!("({}, {})", v.uv[0], v.uv[1]))
-        .collect();
-    writeln!(
-        usda,
-        "        texCoord2f[] primvars:st = [{}] (",
-        uvs.join(", ")
-    )
-    .unwrap();
+    write!(usda, "        texCoord2f[] primvars:st = [").unwrap();
+    write_array_inline(usda, &mesh.vertices, |v, s| {
+        write!(s, "({}, {})", v.uv[0], v.uv[1]).unwrap();
+    });
+    writeln!(usda, "] (").unwrap();
     writeln!(usda, "            interpolation = \"vertex\"").unwrap();
     writeln!(usda, "        )").unwrap();
 
@@ -337,30 +337,21 @@ fn write_mesh_prim(usda: &mut String, name: &str, mesh: &Mesh, material: &str) {
         v.color[0] != 1.0 || v.color[1] != 1.0 || v.color[2] != 1.0 || v.color[3] != 1.0
     });
     if has_non_white {
-        let colors: Vec<String> = mesh
-            .vertices
-            .iter()
-            .map(|v| format!("({}, {}, {})", v.color[0], v.color[1], v.color[2]))
-            .collect();
-        writeln!(
-            usda,
-            "        color3f[] primvars:displayColor = [{}] (",
-            colors.join(", ")
-        )
-        .unwrap();
+        write!(usda, "        color3f[] primvars:displayColor = [").unwrap();
+        write_array_inline(usda, &mesh.vertices, |v, s| {
+            write!(s, "({}, {}, {})", v.color[0], v.color[1], v.color[2]).unwrap();
+        });
+        writeln!(usda, "] (").unwrap();
         writeln!(usda, "            interpolation = \"vertex\"").unwrap();
         writeln!(usda, "        )").unwrap();
 
         let has_non_opaque = mesh.vertices.iter().any(|v| v.color[3] != 1.0);
         if has_non_opaque {
-            let opacities: Vec<String> =
-                mesh.vertices.iter().map(|v| format!("{}", v.color[3])).collect();
-            writeln!(
-                usda,
-                "        float[] primvars:displayOpacity = [{}] (",
-                opacities.join(", ")
-            )
-            .unwrap();
+            write!(usda, "        float[] primvars:displayOpacity = [").unwrap();
+            write_array_inline(usda, &mesh.vertices, |v, s| {
+                write!(s, "{}", v.color[3]).unwrap();
+            });
+            writeln!(usda, "] (").unwrap();
             writeln!(usda, "            interpolation = \"vertex\"").unwrap();
             writeln!(usda, "        )").unwrap();
         }

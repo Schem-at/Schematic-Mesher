@@ -10,12 +10,14 @@ use crate::resolver::{resolve_block, ModelResolver, ResolvedModel};
 use crate::resource_pack::{BlockModel, ModelElement, ModelFace, ResourcePack};
 use crate::types::{BlockPosition, BlockTransform, Direction, InputBlock};
 use glam::{Mat3, Vec3};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Tracks texture mapping for a face (4 vertices).
 struct FaceTextureMapping {
     /// Starting vertex index.
     vertex_start: u32,
+    /// Starting index in the index buffer (6 indices per quad: 2 triangles).
+    index_start: usize,
     /// Texture path for this face.
     texture_path: String,
     /// Whether this face uses a transparent texture.
@@ -26,6 +28,8 @@ struct FaceTextureMapping {
 struct GreedyFaceMapping {
     /// Starting vertex index.
     vertex_start: u32,
+    /// Starting index in the index buffer (6 indices per quad: 2 triangles).
+    index_start: usize,
     /// Texture path for this face.
     texture_path: String,
     /// Whether this face uses a transparent texture.
@@ -48,6 +52,28 @@ pub struct GreedyMaterial {
     pub texture_png: Vec<u8>,
 }
 
+/// Build a cache key from a block's name and properties.
+/// Format: "name" for blocks with no properties, "name|k1=v1,k2=v2" with sorted keys otherwise.
+fn block_cache_key(block: &InputBlock) -> String {
+    if block.properties.is_empty() {
+        block.name.clone()
+    } else {
+        let mut props: Vec<_> = block.properties.iter().collect();
+        props.sort_by_key(|(k, _)| k.as_str());
+        let mut key = block.name.clone();
+        key.push('|');
+        for (i, (k, v)) in props.iter().enumerate() {
+            if i > 0 {
+                key.push(',');
+            }
+            key.push_str(k);
+            key.push('=');
+            key.push_str(v);
+        }
+        key
+    }
+}
+
 /// Builds a mesh from multiple blocks.
 pub struct MeshBuilder<'a> {
     resource_pack: &'a ResourcePack,
@@ -63,6 +89,8 @@ pub struct MeshBuilder<'a> {
     culler: Option<&'a FaceCuller<'a>>,
     /// Greedy mesher for merging adjacent coplanar faces.
     greedy: Option<GreedyMesher>,
+    /// Cache of resolved models keyed by block identity (name + properties).
+    resolve_cache: HashMap<String, Vec<ResolvedModel>>,
 }
 
 impl<'a> MeshBuilder<'a> {
@@ -86,6 +114,7 @@ impl<'a> MeshBuilder<'a> {
             greedy_face_textures: Vec::new(),
             culler,
             greedy,
+            resolve_cache: HashMap::new(),
         }
     }
 
@@ -95,6 +124,16 @@ impl<'a> MeshBuilder<'a> {
         pos: BlockPosition,
         block: &InputBlock,
     ) -> Result<()> {
+        let cache_key = block_cache_key(block);
+
+        // Check resolution cache first
+        if let Some(cached) = self.resolve_cache.get(&cache_key).cloned() {
+            for resolved in &cached {
+                self.add_model(pos, block, resolved)?;
+            }
+            return Ok(());
+        }
+
         // Resolve the block to models
         let resolved_models = match resolve_block(self.resource_pack, block) {
             Ok(models) => models,
@@ -106,9 +145,12 @@ impl<'a> MeshBuilder<'a> {
         };
 
         // Generate geometry for each model
-        for resolved in resolved_models {
-            self.add_model(pos, block, &resolved)?;
+        for resolved in &resolved_models {
+            self.add_model(pos, block, resolved)?;
         }
+
+        // Store in cache for future blocks with same identity
+        self.resolve_cache.insert(cache_key, resolved_models);
 
         Ok(())
     }
@@ -246,8 +288,10 @@ impl<'a> MeshBuilder<'a> {
 
             // Track texture mapping for UV remapping
             let vertex_start = self.mesh.vertex_count() as u32;
+            let index_start = self.mesh.indices.len();
             self.face_textures.push(FaceTextureMapping {
                 vertex_start,
+                index_start,
                 texture_path,
                 is_transparent,
             });
@@ -601,8 +645,10 @@ impl<'a> MeshBuilder<'a> {
 
             // Track greedy face separately (bypasses atlas UV remapping)
             let vertex_start = self.mesh.vertex_count() as u32;
+            let index_start = self.mesh.indices.len();
             self.greedy_face_textures.push(GreedyFaceMapping {
                 vertex_start,
+                index_start,
                 texture_path: quad.texture.clone(),
                 is_transparent: quad.is_transparent,
                 ao: quad.ao,
@@ -689,13 +735,10 @@ impl<'a> MeshBuilder<'a> {
         let mut material_map: HashMap<MaterialKey, (Mesh, Mesh)> = HashMap::new();
 
         for face_mapping in &self.greedy_face_textures {
-            let start = face_mapping.vertex_start as usize;
+            let vstart = face_mapping.vertex_start as usize;
+            let istart = face_mapping.index_start;
 
-            let vertices: Vec<_> = (0..4)
-                .filter_map(|i| self.mesh.vertices.get(start + i).copied())
-                .collect();
-
-            if vertices.len() != 4 {
+            if vstart + 4 > self.mesh.vertices.len() || istart + 6 > self.mesh.indices.len() {
                 continue;
             }
 
@@ -710,33 +753,22 @@ impl<'a> MeshBuilder<'a> {
                 opaque_mesh
             };
 
-            let v0 = target_mesh.add_vertex(vertices[0]);
-            let v1 = target_mesh.add_vertex(vertices[1]);
-            let v2 = target_mesh.add_vertex(vertices[2]);
-            let v3 = target_mesh.add_vertex(vertices[3]);
-
             let orig_v0 = face_mapping.vertex_start;
-            let orig_v3 = orig_v0 + 3;
+            let v0 = target_mesh.add_vertex(self.mesh.vertices[vstart]);
+            let v1 = target_mesh.add_vertex(self.mesh.vertices[vstart + 1]);
+            let v2 = target_mesh.add_vertex(self.mesh.vertices[vstart + 2]);
+            let v3 = target_mesh.add_vertex(self.mesh.vertices[vstart + 3]);
 
-            for tri_idx in (0..self.mesh.indices.len()).step_by(3) {
-                let i0 = self.mesh.indices[tri_idx];
-                let i1 = self.mesh.indices[tri_idx + 1];
-                let i2 = self.mesh.indices[tri_idx + 2];
-
-                if i0 >= orig_v0 && i0 <= orig_v3 &&
-                   i1 >= orig_v0 && i1 <= orig_v3 &&
-                   i2 >= orig_v0 && i2 <= orig_v3 {
-                    let new_i0 = match i0 - orig_v0 {
-                        0 => v0, 1 => v1, 2 => v2, _ => v3
-                    };
-                    let new_i1 = match i1 - orig_v0 {
-                        0 => v0, 1 => v1, 2 => v2, _ => v3
-                    };
-                    let new_i2 = match i2 - orig_v0 {
-                        0 => v0, 1 => v1, 2 => v2, _ => v3
-                    };
-                    target_mesh.add_triangle(new_i0, new_i1, new_i2);
-                }
+            // Directly read the 6 indices (2 triangles) from the tracked position
+            for tri in 0..2 {
+                let base = istart + tri * 3;
+                let i0 = self.mesh.indices[base];
+                let i1 = self.mesh.indices[base + 1];
+                let i2 = self.mesh.indices[base + 2];
+                let new_i0 = match i0 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+                let new_i1 = match i1 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+                let new_i2 = match i2 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+                target_mesh.add_triangle(new_i0, new_i1, new_i2);
             }
         }
 
@@ -776,65 +808,38 @@ impl<'a> MeshBuilder<'a> {
         let mut opaque_mesh = Mesh::new();
         let mut transparent_mesh = Mesh::new();
 
-        // Process each face (4 vertices + 2 triangles per face)
+        // Process each face using tracked index positions (O(n) instead of O(n²))
         for face_mapping in &self.face_textures {
-            let start = face_mapping.vertex_start as usize;
+            let vstart = face_mapping.vertex_start as usize;
+            let istart = face_mapping.index_start;
 
             // Get the 4 vertices for this face
-            let vertices: Vec<_> = (0..4)
-                .filter_map(|i| self.mesh.vertices.get(start + i).copied())
-                .collect();
-
-            if vertices.len() != 4 {
+            if vstart + 4 > self.mesh.vertices.len() || istart + 6 > self.mesh.indices.len() {
                 continue;
             }
 
-            // Find the triangles that use these vertices
-            // In our mesh, faces are added as quads which become 2 triangles
-            // We need to find the triangle indices that reference these vertices
-
-            // Add to appropriate mesh
             let target_mesh = if face_mapping.is_transparent {
                 &mut transparent_mesh
             } else {
                 &mut opaque_mesh
             };
 
-            // Add the 4 vertices and get their new indices
-            let v0 = target_mesh.add_vertex(vertices[0]);
-            let v1 = target_mesh.add_vertex(vertices[1]);
-            let v2 = target_mesh.add_vertex(vertices[2]);
-            let v3 = target_mesh.add_vertex(vertices[3]);
-
-            // Find the triangle winding from original mesh
-            // Search for triangles that use the original vertex indices
             let orig_v0 = face_mapping.vertex_start;
-            let orig_v1 = orig_v0 + 1;
-            let orig_v2 = orig_v0 + 2;
-            let orig_v3 = orig_v0 + 3;
+            let v0 = target_mesh.add_vertex(self.mesh.vertices[vstart]);
+            let v1 = target_mesh.add_vertex(self.mesh.vertices[vstart + 1]);
+            let v2 = target_mesh.add_vertex(self.mesh.vertices[vstart + 2]);
+            let v3 = target_mesh.add_vertex(self.mesh.vertices[vstart + 3]);
 
-            // Find triangles in original mesh that use these vertices
-            for tri_idx in (0..self.mesh.indices.len()).step_by(3) {
-                let i0 = self.mesh.indices[tri_idx];
-                let i1 = self.mesh.indices[tri_idx + 1];
-                let i2 = self.mesh.indices[tri_idx + 2];
-
-                // Check if this triangle uses our face's vertices
-                if i0 >= orig_v0 && i0 <= orig_v3 &&
-                   i1 >= orig_v0 && i1 <= orig_v3 &&
-                   i2 >= orig_v0 && i2 <= orig_v3 {
-                    // Map old indices to new
-                    let new_i0 = match i0 - orig_v0 {
-                        0 => v0, 1 => v1, 2 => v2, _ => v3
-                    };
-                    let new_i1 = match i1 - orig_v0 {
-                        0 => v0, 1 => v1, 2 => v2, _ => v3
-                    };
-                    let new_i2 = match i2 - orig_v0 {
-                        0 => v0, 1 => v1, 2 => v2, _ => v3
-                    };
-                    target_mesh.add_triangle(new_i0, new_i1, new_i2);
-                }
+            // Directly read the 6 indices (2 triangles) from the tracked position
+            for tri in 0..2 {
+                let base = istart + tri * 3;
+                let i0 = self.mesh.indices[base];
+                let i1 = self.mesh.indices[base + 1];
+                let i2 = self.mesh.indices[base + 2];
+                let new_i0 = match i0 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+                let new_i1 = match i1 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+                let new_i2 = match i2 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+                target_mesh.add_triangle(new_i0, new_i1, new_i2);
             }
         }
 

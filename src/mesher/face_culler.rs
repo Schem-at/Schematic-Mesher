@@ -24,12 +24,21 @@ enum BlockCullType {
     Transparent(String),
 }
 
+/// Encoded cull type for the flat 3D array.
+const CELL_EMPTY: u8 = 0;
+const CELL_OPAQUE: u8 = 1;
+const CELL_TRANSPARENT: u8 = 2;
+
 /// Face culler for determining which faces should be hidden.
 pub struct FaceCuller<'a> {
-    /// Map of block positions to their cull type.
+    /// Map of block positions to their cull type (kept for transparent group lookups in should_cull).
     block_types: HashMap<BlockPosition, BlockCullType>,
-    /// Set of occupied positions (for quick lookup).
-    occupied: HashSet<BlockPosition>,
+    /// Flat 3D array for fast opacity lookups (indexed by offset from grid_min).
+    grid: Vec<u8>,
+    /// Minimum corner of the bounding box.
+    grid_min: [i32; 3],
+    /// Dimensions of the grid (size_x, size_y, size_z).
+    grid_size: [usize; 3],
     /// Resource pack reference for model resolution.
     pack: &'a ResourcePack,
     /// Cache of block name -> cull type results.
@@ -39,20 +48,91 @@ pub struct FaceCuller<'a> {
 impl<'a> FaceCuller<'a> {
     /// Create a face culler from a list of blocks, using model data to determine opacity.
     pub fn new(pack: &'a ResourcePack, blocks: &[(BlockPosition, &InputBlock)]) -> Self {
+        // Compute bounding box (with 1-block padding for AO neighbor lookups)
+        let (grid_min, grid_size) = if blocks.is_empty() {
+            ([0i32; 3], [0usize; 3])
+        } else {
+            let mut min = [i32::MAX; 3];
+            let mut max = [i32::MIN; 3];
+            for (pos, _) in blocks {
+                min[0] = min[0].min(pos.x);
+                min[1] = min[1].min(pos.y);
+                min[2] = min[2].min(pos.z);
+                max[0] = max[0].max(pos.x);
+                max[1] = max[1].max(pos.y);
+                max[2] = max[2].max(pos.z);
+            }
+            // Pad by 1 on each side so AO neighbor lookups stay in bounds
+            min[0] -= 1;
+            min[1] -= 1;
+            min[2] -= 1;
+            max[0] += 1;
+            max[1] += 1;
+            max[2] += 1;
+            let size = [
+                (max[0] - min[0] + 1) as usize,
+                (max[1] - min[1] + 1) as usize,
+                (max[2] - min[2] + 1) as usize,
+            ];
+            (min, size)
+        };
+
         let mut culler = Self {
             block_types: HashMap::new(),
-            occupied: HashSet::new(),
+            grid: vec![CELL_EMPTY; grid_size[0] * grid_size[1] * grid_size[2]],
+            grid_min,
+            grid_size,
             pack,
             cull_cache: HashMap::new(),
         };
 
         for (pos, block) in blocks {
-            culler.occupied.insert(*pos);
             let cull_type = culler.classify_block(block);
+            let cell = match &cull_type {
+                BlockCullType::Opaque => CELL_OPAQUE,
+                BlockCullType::Transparent(_) => CELL_TRANSPARENT,
+                BlockCullType::NonSolid => CELL_EMPTY,
+            };
+            if let Some(idx) = culler.grid_index(*pos) {
+                culler.grid[idx] = cell;
+            }
             culler.block_types.insert(*pos, cull_type);
         }
 
         culler
+    }
+
+    /// Convert a block position to a flat grid index, or None if out of bounds.
+    #[inline]
+    fn grid_index(&self, pos: BlockPosition) -> Option<usize> {
+        let x = (pos.x - self.grid_min[0]) as usize;
+        let y = (pos.y - self.grid_min[1]) as usize;
+        let z = (pos.z - self.grid_min[2]) as usize;
+        if x < self.grid_size[0] && y < self.grid_size[1] && z < self.grid_size[2] {
+            Some(x + y * self.grid_size[0] + z * self.grid_size[0] * self.grid_size[1])
+        } else {
+            None
+        }
+    }
+
+    /// Fast grid lookup for a cell value (returns CELL_EMPTY for out-of-bounds).
+    #[inline]
+    fn grid_cell(&self, pos: BlockPosition) -> u8 {
+        // Compute signed offsets
+        let x = pos.x - self.grid_min[0];
+        let y = pos.y - self.grid_min[1];
+        let z = pos.z - self.grid_min[2];
+        if x < 0 || y < 0 || z < 0 {
+            return CELL_EMPTY;
+        }
+        let x = x as usize;
+        let y = y as usize;
+        let z = z as usize;
+        if x < self.grid_size[0] && y < self.grid_size[1] && z < self.grid_size[2] {
+            self.grid[x + y * self.grid_size[0] + z * self.grid_size[0] * self.grid_size[1]]
+        } else {
+            CELL_EMPTY
+        }
     }
 
     /// Classify a block for culling purposes.
@@ -201,45 +281,41 @@ impl<'a> FaceCuller<'a> {
     /// Check if a face should be culled.
     pub fn should_cull(&self, pos: BlockPosition, cullface: Direction) -> bool {
         let neighbor_pos = pos.neighbor(cullface);
+        let neighbor_cell = self.grid_cell(neighbor_pos);
 
         // If there's no block in that direction, don't cull
-        if !self.occupied.contains(&neighbor_pos) {
+        if neighbor_cell == CELL_EMPTY {
             return false;
         }
 
-        let neighbor_type = self.block_types.get(&neighbor_pos);
+        // If neighbor is opaque, always cull
+        if neighbor_cell == CELL_OPAQUE {
+            return true;
+        }
+
+        // Neighbor is transparent — only cull if current block is same transparent group
         let current_type = self.block_types.get(&pos);
+        let neighbor_type = self.block_types.get(&neighbor_pos);
 
         match (current_type, neighbor_type) {
-            // If neighbor is opaque, always cull
-            (_, Some(BlockCullType::Opaque)) => true,
-
-            // If current block is transparent, only cull if neighbor is same transparent group
             (Some(BlockCullType::Transparent(current_group)), Some(BlockCullType::Transparent(neighbor_group))) => {
                 current_group == neighbor_group
             }
-
-            // Transparent blocks don't cull against opaque blocks at their own position
-            // (handled by the first match arm checking neighbor)
-
-            // All other cases - don't cull
             _ => false,
         }
     }
 
     /// Check if a position has an opaque block (for AO calculations).
     /// Note: Both opaque and transparent blocks contribute to AO.
+    #[inline]
     pub fn is_opaque_at(&self, pos: BlockPosition) -> bool {
-        match self.block_types.get(&pos) {
-            Some(BlockCullType::Opaque) => true,
-            Some(BlockCullType::Transparent(_)) => true, // Transparent blocks also cast AO
-            _ => false,
-        }
+        self.grid_cell(pos) != CELL_EMPTY
     }
 
     /// Check if a position has a fully opaque (non-transparent) block.
+    #[inline]
     pub fn is_fully_opaque_at(&self, pos: BlockPosition) -> bool {
-        matches!(self.block_types.get(&pos), Some(BlockCullType::Opaque))
+        self.grid_cell(pos) == CELL_OPAQUE
     }
 
     /// Check if a block is fully occluded (all 6 neighbors are fully opaque).
@@ -249,8 +325,9 @@ impl<'a> FaceCuller<'a> {
     }
 
     /// Check if a position is occupied.
+    #[inline]
     pub fn is_occupied(&self, pos: BlockPosition) -> bool {
-        self.occupied.contains(&pos)
+        self.grid_cell(pos) != CELL_EMPTY
     }
 
     /// Calculate ambient occlusion values for the 4 vertices of a face.

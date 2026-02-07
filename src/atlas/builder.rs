@@ -2,6 +2,7 @@
 
 use crate::error::{MesherError, Result};
 use crate::resource_pack::TextureData;
+use image::ImageEncoder;
 use std::collections::HashMap;
 
 /// A region within the texture atlas.
@@ -73,16 +74,17 @@ impl TextureAtlas {
 
     /// Export the atlas as PNG bytes.
     pub fn to_png(&self) -> Result<Vec<u8>> {
-        use image::{ImageBuffer, Rgba};
-
-        let img: ImageBuffer<Rgba<u8>, _> =
-            ImageBuffer::from_raw(self.width, self.height, self.pixels.clone())
-                .ok_or_else(|| MesherError::AtlasBuild("Failed to create image buffer".to_string()))?;
-
         let mut bytes = Vec::new();
-        let mut cursor = std::io::Cursor::new(&mut bytes);
+        let cursor = std::io::Cursor::new(&mut bytes);
+        let encoder = image::codecs::png::PngEncoder::new(cursor);
 
-        img.write_to(&mut cursor, image::ImageFormat::Png)
+        encoder
+            .write_image(
+                &self.pixels,
+                self.width,
+                self.height,
+                image::ExtendedColorType::Rgba8,
+            )
             .map_err(|e| MesherError::AtlasBuild(format!("Failed to encode PNG: {}", e)))?;
 
         Ok(bytes)
