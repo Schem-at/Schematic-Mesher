@@ -7,7 +7,7 @@
 //! Run: cargo run --example test_greedy
 
 use schematic_mesher::{
-    export_glb, load_resource_pack, Mesher, MesherConfig, TintProvider,
+    export_glb, export_usdz, load_resource_pack, Mesher, MesherConfig, TintProvider,
     types::{BlockPosition, BlockSource, BoundingBox, InputBlock},
 };
 use std::collections::HashMap;
@@ -125,6 +125,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let glb_off = export_glb(&output_off)?;
         fs::write(artifacts_dir.join("cube_baseline.glb"), &glb_off)?;
+        let usdz_off = export_usdz(&output_off)?;
+        fs::write(artifacts_dir.join("cube_baseline.usdz"), &usdz_off)?;
 
         // Greedy + occlusion
         let pack2 = load_resource_pack("pack.zip")?;
@@ -167,6 +169,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let glb_on = export_glb(&output_on)?;
         fs::write(artifacts_dir.join("cube_optimized.glb"), &glb_on)?;
+        let usdz_on = export_usdz(&output_on)?;
+        fs::write(artifacts_dir.join("cube_optimized.usdz"), &usdz_on)?;
     }
 
     // --- Test 2: Mixed scene ---
@@ -200,6 +204,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let glb_off = export_glb(&output_off)?;
         fs::write(artifacts_dir.join("mixed_baseline.glb"), &glb_off)?;
+        let usdz_off = export_usdz(&output_off)?;
+        fs::write(artifacts_dir.join("mixed_baseline.usdz"), &usdz_off)?;
 
         let pack2 = load_resource_pack("pack.zip")?;
         let config_on = MesherConfig {
@@ -241,13 +247,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let glb_on = export_glb(&output_on)?;
         fs::write(artifacts_dir.join("mixed_optimized.glb"), &glb_on)?;
+        let usdz_on = export_usdz(&output_on)?;
+        fs::write(artifacts_dir.join("mixed_optimized.usdz"), &usdz_on)?;
     }
 
     println!("\n--- Output files ---");
-    println!("  artifacts/cube_baseline.glb    (no optimization)");
-    println!("  artifacts/cube_optimized.glb   (greedy + occlusion)");
-    println!("  artifacts/mixed_baseline.glb   (no optimization)");
-    println!("  artifacts/mixed_optimized.glb  (greedy + occlusion)");
+    println!("  artifacts/cube_baseline.glb     (no optimization)");
+    println!("  artifacts/cube_baseline.usdz    (no optimization)");
+    println!("  artifacts/cube_optimized.glb    (greedy + occlusion)");
+    println!("  artifacts/cube_optimized.usdz   (greedy + occlusion)");
+    println!("  artifacts/mixed_baseline.glb    (no optimization)");
+    println!("  artifacts/mixed_baseline.usdz   (no optimization)");
+    println!("  artifacts/mixed_optimized.glb   (greedy + occlusion)");
+    println!("  artifacts/mixed_optimized.usdz  (greedy + occlusion)");
     println!("\nAO is baked directly into tile textures (not vertex colors).");
     println!("Open in any glTF viewer or Blender to compare!");
 

@@ -61,6 +61,7 @@ pub use atlas::TextureAtlas;
 pub use export::gltf::export_glb;
 pub use export::obj::{export_obj, ObjExport};
 pub use export::raw::{export_raw, RawMeshData};
+pub use export::usd::{export_usda, export_usdz, UsdaExport, UsdTexture};
 
 /// Load a resource pack from a file path (ZIP or directory).
 pub fn load_resource_pack<P: AsRef<std::path::Path>>(path: P) -> Result<ResourcePack> {
