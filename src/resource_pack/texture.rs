@@ -76,6 +76,20 @@ impl TextureData {
         ]
     }
 
+    /// Encode this texture as PNG bytes.
+    pub fn to_png(&self) -> Result<Vec<u8>, image::ImageError> {
+        use image::{ImageBuffer, Rgba};
+
+        let img: ImageBuffer<Rgba<u8>, _> =
+            ImageBuffer::from_raw(self.width, self.height, self.pixels.clone())
+                .expect("Failed to create image buffer from TextureData");
+
+        let mut bytes = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut bytes);
+        img.write_to(&mut cursor, image::ImageFormat::Png)?;
+        Ok(bytes)
+    }
+
     /// Get the first frame of an animated texture (or the whole texture if not animated).
     pub fn first_frame(&self) -> TextureData {
         if !self.is_animated || self.frame_count <= 1 {

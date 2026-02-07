@@ -9,18 +9,22 @@ use std::fmt::Write;
 
 /// Export a mesh to OBJ format.
 /// Returns (obj_content, mtl_content) as strings.
-/// Note: OBJ doesn't support separate transparency handling, so opaque and transparent
-/// geometry are combined.
+/// Greedy materials get separate MTL entries referencing individual texture files.
 pub fn export_obj(output: &MesherOutput, name: &str) -> Result<(String, String)> {
-    // Combine opaque and transparent meshes for OBJ export
-    let mesh = output.mesh();
     let mut obj = String::new();
     let mut mtl = String::new();
 
+    // Combine atlas-based meshes
+    let mut atlas_mesh = output.opaque_mesh.clone();
+    atlas_mesh.merge(&output.transparent_mesh);
+
+    let total_verts = output.total_vertices();
+    let total_tris = output.total_triangles();
+
     // OBJ header
     writeln!(obj, "# Schematic Mesher OBJ Export").unwrap();
-    writeln!(obj, "# Vertices: {}", mesh.vertex_count()).unwrap();
-    writeln!(obj, "# Triangles: {}", mesh.triangle_count()).unwrap();
+    writeln!(obj, "# Vertices: {}", total_verts).unwrap();
+    writeln!(obj, "# Triangles: {}", total_tris).unwrap();
     writeln!(obj).unwrap();
 
     // Reference material file
@@ -31,50 +35,65 @@ pub fn export_obj(output: &MesherOutput, name: &str) -> Result<(String, String)>
     writeln!(obj, "o {}", name).unwrap();
     writeln!(obj).unwrap();
 
-    // Vertices (v x y z)
-    // OBJ also supports vertex colors as: v x y z r g b
-    for vertex in &mesh.vertices {
-        writeln!(
-            obj,
-            "v {} {} {} {} {} {}",
-            vertex.position[0],
-            vertex.position[1],
-            vertex.position[2],
-            vertex.color[0],
-            vertex.color[1],
-            vertex.color[2]
-        )
-        .unwrap();
+    // Collect all meshes: atlas mesh first, then greedy materials
+    let mut all_meshes: Vec<&crate::mesher::geometry::Mesh> = Vec::new();
+    all_meshes.push(&atlas_mesh);
+    for gm in &output.greedy_materials {
+        if !gm.opaque_mesh.is_empty() {
+            all_meshes.push(&gm.opaque_mesh);
+        }
+        if !gm.transparent_mesh.is_empty() {
+            all_meshes.push(&gm.transparent_mesh);
+        }
+    }
+
+    // Write all vertices, UVs, and normals globally (OBJ has global pools)
+    for mesh in &all_meshes {
+        for vertex in &mesh.vertices {
+            writeln!(
+                obj,
+                "v {} {} {} {} {} {}",
+                vertex.position[0],
+                vertex.position[1],
+                vertex.position[2],
+                vertex.color[0],
+                vertex.color[1],
+                vertex.color[2]
+            )
+            .unwrap();
+        }
     }
     writeln!(obj).unwrap();
 
-    // Texture coordinates (vt u v)
-    for vertex in &mesh.vertices {
-        writeln!(obj, "vt {} {}", vertex.uv[0], vertex.uv[1]).unwrap();
+    for mesh in &all_meshes {
+        for vertex in &mesh.vertices {
+            writeln!(obj, "vt {} {}", vertex.uv[0], vertex.uv[1]).unwrap();
+        }
     }
     writeln!(obj).unwrap();
 
-    // Normals (vn x y z)
-    for vertex in &mesh.vertices {
-        writeln!(
-            obj,
-            "vn {} {} {}",
-            vertex.normal[0], vertex.normal[1], vertex.normal[2]
-        )
-        .unwrap();
+    for mesh in &all_meshes {
+        for vertex in &mesh.vertices {
+            writeln!(
+                obj,
+                "vn {} {} {}",
+                vertex.normal[0], vertex.normal[1], vertex.normal[2]
+            )
+            .unwrap();
+        }
     }
     writeln!(obj).unwrap();
 
-    // Use material
+    // Write faces per material group
+    let mut vertex_offset: usize = 0;
+
+    // Atlas material faces
     writeln!(obj, "usemtl {}_material", name).unwrap();
     writeln!(obj).unwrap();
-
-    // Faces (f v/vt/vn v/vt/vn v/vt/vn)
-    // OBJ indices are 1-based
-    for i in (0..mesh.indices.len()).step_by(3) {
-        let i0 = mesh.indices[i] as usize + 1;
-        let i1 = mesh.indices[i + 1] as usize + 1;
-        let i2 = mesh.indices[i + 2] as usize + 1;
+    for i in (0..atlas_mesh.indices.len()).step_by(3) {
+        let i0 = atlas_mesh.indices[i] as usize + vertex_offset + 1;
+        let i1 = atlas_mesh.indices[i + 1] as usize + vertex_offset + 1;
+        let i2 = atlas_mesh.indices[i + 2] as usize + vertex_offset + 1;
         writeln!(
             obj,
             "f {}/{}/{} {}/{}/{} {}/{}/{}",
@@ -82,20 +101,69 @@ pub fn export_obj(output: &MesherOutput, name: &str) -> Result<(String, String)>
         )
         .unwrap();
     }
+    vertex_offset += atlas_mesh.vertex_count();
+
+    // Greedy material faces
+    for (gi, gm) in output.greedy_materials.iter().enumerate() {
+        let mat_name = format!("greedy_{}", gi);
+        for (sub_mesh, _is_transparent) in [(&gm.opaque_mesh, false), (&gm.transparent_mesh, true)] {
+            if sub_mesh.is_empty() {
+                continue;
+            }
+            writeln!(obj, "usemtl {}", mat_name).unwrap();
+            for i in (0..sub_mesh.indices.len()).step_by(3) {
+                let i0 = sub_mesh.indices[i] as usize + vertex_offset + 1;
+                let i1 = sub_mesh.indices[i + 1] as usize + vertex_offset + 1;
+                let i2 = sub_mesh.indices[i + 2] as usize + vertex_offset + 1;
+                writeln!(
+                    obj,
+                    "f {}/{}/{} {}/{}/{} {}/{}/{}",
+                    i0, i0, i0, i1, i1, i1, i2, i2, i2
+                )
+                .unwrap();
+            }
+            vertex_offset += sub_mesh.vertex_count();
+        }
+    }
 
     // MTL file
     writeln!(mtl, "# Schematic Mesher Material").unwrap();
     writeln!(mtl).unwrap();
+
+    // Atlas material
     writeln!(mtl, "newmtl {}_material", name).unwrap();
-    writeln!(mtl, "Ka 1.0 1.0 1.0").unwrap(); // Ambient
-    writeln!(mtl, "Kd 1.0 1.0 1.0").unwrap(); // Diffuse
-    writeln!(mtl, "Ks 0.0 0.0 0.0").unwrap(); // Specular
-    writeln!(mtl, "Ns 10.0").unwrap(); // Specular exponent
-    writeln!(mtl, "d 1.0").unwrap(); // Opacity
-    writeln!(mtl, "illum 1").unwrap(); // Illumination model (1 = diffuse only)
-    writeln!(mtl, "map_Kd {}_atlas.png", name).unwrap(); // Diffuse texture
+    writeln!(mtl, "Ka 1.0 1.0 1.0").unwrap();
+    writeln!(mtl, "Kd 1.0 1.0 1.0").unwrap();
+    writeln!(mtl, "Ks 0.0 0.0 0.0").unwrap();
+    writeln!(mtl, "Ns 10.0").unwrap();
+    writeln!(mtl, "d 1.0").unwrap();
+    writeln!(mtl, "illum 1").unwrap();
+    writeln!(mtl, "map_Kd {}_atlas.png", name).unwrap();
+
+    // Greedy materials
+    for (gi, gm) in output.greedy_materials.iter().enumerate() {
+        writeln!(mtl).unwrap();
+        writeln!(mtl, "newmtl greedy_{}", gi).unwrap();
+        writeln!(mtl, "Ka 1.0 1.0 1.0").unwrap();
+        writeln!(mtl, "Kd 1.0 1.0 1.0").unwrap();
+        writeln!(mtl, "Ks 0.0 0.0 0.0").unwrap();
+        writeln!(mtl, "Ns 10.0").unwrap();
+        writeln!(mtl, "d 1.0").unwrap();
+        writeln!(mtl, "illum 1").unwrap();
+        // Reference individual texture file
+        let tex_filename = gm.texture_path.replace('/', "_");
+        writeln!(mtl, "map_Kd {}.png", tex_filename).unwrap();
+    }
 
     Ok((obj, mtl))
+}
+
+/// A named texture file for OBJ export.
+pub struct ObjTexture {
+    /// Filename for this texture (e.g., "block_stone.png").
+    pub filename: String,
+    /// PNG-encoded texture data.
+    pub png_data: Vec<u8>,
 }
 
 /// Export mesh and atlas to OBJ format bytes for writing to files.
@@ -103,16 +171,26 @@ pub struct ObjExport {
     pub obj: String,
     pub mtl: String,
     pub texture_png: Vec<u8>,
+    /// Additional texture files for greedy materials.
+    pub greedy_textures: Vec<ObjTexture>,
 }
 
 impl ObjExport {
     pub fn from_output(output: &MesherOutput, name: &str) -> Result<Self> {
         let (obj, mtl) = export_obj(output, name)?;
         let texture_png = output.atlas.to_png()?;
+        let greedy_textures = output.greedy_materials.iter().map(|gm| {
+            let filename = format!("{}.png", gm.texture_path.replace('/', "_"));
+            ObjTexture {
+                filename,
+                png_data: gm.texture_png.clone(),
+            }
+        }).collect();
         Ok(Self {
             obj,
             mtl,
             texture_png,
+            greedy_textures,
         })
     }
 }
@@ -139,6 +217,7 @@ mod tests {
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
+            greedy_materials: Vec::new(),
         };
 
         let (obj, mtl) = export_obj(&output, "test").unwrap();

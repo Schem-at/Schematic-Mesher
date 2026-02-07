@@ -10,326 +10,264 @@ use std::mem;
 
 /// Export a mesh to GLB format (binary glTF) with embedded texture.
 /// Separates opaque and transparent geometry into different primitives for correct rendering.
+/// Greedy-merged materials get their own textures with REPEAT wrapping for proper tiling.
 pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
     let opaque_mesh = &output.opaque_mesh;
     let transparent_mesh = &output.transparent_mesh;
     let atlas = &output.atlas;
-
-    // Check if both meshes are empty
-    if opaque_mesh.is_empty() && transparent_mesh.is_empty() {
+    // Check if all meshes are empty
+    let has_greedy = output.greedy_materials.iter().any(|gm| {
+        !gm.opaque_mesh.is_empty() || !gm.transparent_mesh.is_empty()
+    });
+    if opaque_mesh.is_empty() && transparent_mesh.is_empty() && !has_greedy {
         return Err(MesherError::Export("Cannot export empty mesh".to_string()));
     }
 
     // Get texture PNG data
     let texture_png = atlas.to_png()?;
 
-    // Calculate buffer data for both meshes
-    let opaque_positions = opaque_mesh.positions_flat();
-    let opaque_normals = opaque_mesh.normals_flat();
-    let opaque_uvs = opaque_mesh.uvs_flat();
-    let opaque_colors = opaque_mesh.colors_flat();
-    let opaque_indices = &opaque_mesh.indices;
+    // Build the binary buffer incrementally
+    let mut buffer_data: Vec<u8> = Vec::new();
 
-    let transparent_positions = transparent_mesh.positions_flat();
-    let transparent_normals = transparent_mesh.normals_flat();
-    let transparent_uvs = transparent_mesh.uvs_flat();
-    let transparent_colors = transparent_mesh.colors_flat();
-    let transparent_indices = &transparent_mesh.indices;
+    // Helper: append mesh data, return (pos_offset, norm_offset, uv_offset, color_offset, idx_offset)
+    fn append_mesh_data(buffer: &mut Vec<u8>, mesh: &Mesh) -> (usize, usize, usize, usize, usize) {
+        let positions = mesh.positions_flat();
+        let normals = mesh.normals_flat();
+        let uvs = mesh.uvs_flat();
+        let colors = mesh.colors_flat();
 
-    // Calculate byte sizes for opaque mesh
-    let opaque_positions_bytes = opaque_positions.len() * mem::size_of::<f32>();
-    let opaque_normals_bytes = opaque_normals.len() * mem::size_of::<f32>();
-    let opaque_uvs_bytes = opaque_uvs.len() * mem::size_of::<f32>();
-    let opaque_colors_bytes = opaque_colors.len() * mem::size_of::<f32>();
-    let opaque_indices_bytes = opaque_indices.len() * mem::size_of::<u32>();
+        let pos_offset = buffer.len();
+        buffer.extend_from_slice(bytemuck_cast_slice(&positions));
+        let norm_offset = buffer.len();
+        buffer.extend_from_slice(bytemuck_cast_slice(&normals));
+        let uv_offset = buffer.len();
+        buffer.extend_from_slice(bytemuck_cast_slice(&uvs));
+        let color_offset = buffer.len();
+        buffer.extend_from_slice(bytemuck_cast_slice(&colors));
+        let idx_offset = buffer.len();
+        buffer.extend_from_slice(bytemuck_cast_slice(&mesh.indices));
 
-    // Calculate byte sizes for transparent mesh
-    let transparent_positions_bytes = transparent_positions.len() * mem::size_of::<f32>();
-    let transparent_normals_bytes = transparent_normals.len() * mem::size_of::<f32>();
-    let transparent_uvs_bytes = transparent_uvs.len() * mem::size_of::<f32>();
-    let transparent_colors_bytes = transparent_colors.len() * mem::size_of::<f32>();
-    let transparent_indices_bytes = transparent_indices.len() * mem::size_of::<u32>();
-
-    // Calculate buffer offsets
-    // Opaque mesh data
-    let opaque_positions_offset = 0;
-    let opaque_normals_offset = opaque_positions_offset + opaque_positions_bytes;
-    let opaque_uvs_offset = opaque_normals_offset + opaque_normals_bytes;
-    let opaque_colors_offset = opaque_uvs_offset + opaque_uvs_bytes;
-    let opaque_indices_offset = opaque_colors_offset + opaque_colors_bytes;
-
-    // Transparent mesh data (after opaque)
-    let transparent_positions_offset = opaque_indices_offset + opaque_indices_bytes;
-    let transparent_normals_offset = transparent_positions_offset + transparent_positions_bytes;
-    let transparent_uvs_offset = transparent_normals_offset + transparent_normals_bytes;
-    let transparent_colors_offset = transparent_uvs_offset + transparent_uvs_bytes;
-    let transparent_indices_offset = transparent_colors_offset + transparent_colors_bytes;
-
-    // Texture (after all mesh data)
-    let texture_offset = transparent_indices_offset + transparent_indices_bytes;
-    let texture_padding_before = (4 - (texture_offset % 4)) % 4;
-    let aligned_texture_offset = texture_offset + texture_padding_before;
-
-    let total_buffer_size = aligned_texture_offset + texture_png.len();
-
-    // Create the binary buffer
-    let mut buffer_data = vec![0u8; total_buffer_size];
-
-    // Copy opaque mesh data
-    if !opaque_mesh.is_empty() {
-        buffer_data[opaque_positions_offset..opaque_positions_offset + opaque_positions_bytes]
-            .copy_from_slice(bytemuck_cast_slice(&opaque_positions));
-        buffer_data[opaque_normals_offset..opaque_normals_offset + opaque_normals_bytes]
-            .copy_from_slice(bytemuck_cast_slice(&opaque_normals));
-        buffer_data[opaque_uvs_offset..opaque_uvs_offset + opaque_uvs_bytes]
-            .copy_from_slice(bytemuck_cast_slice(&opaque_uvs));
-        buffer_data[opaque_colors_offset..opaque_colors_offset + opaque_colors_bytes]
-            .copy_from_slice(bytemuck_cast_slice(&opaque_colors));
-        buffer_data[opaque_indices_offset..opaque_indices_offset + opaque_indices_bytes]
-            .copy_from_slice(bytemuck_cast_slice(opaque_indices));
+        (pos_offset, norm_offset, uv_offset, color_offset, idx_offset)
     }
 
-    // Copy transparent mesh data
-    if !transparent_mesh.is_empty() {
-        buffer_data
-            [transparent_positions_offset..transparent_positions_offset + transparent_positions_bytes]
-            .copy_from_slice(bytemuck_cast_slice(&transparent_positions));
-        buffer_data
-            [transparent_normals_offset..transparent_normals_offset + transparent_normals_bytes]
-            .copy_from_slice(bytemuck_cast_slice(&transparent_normals));
-        buffer_data[transparent_uvs_offset..transparent_uvs_offset + transparent_uvs_bytes]
-            .copy_from_slice(bytemuck_cast_slice(&transparent_uvs));
-        buffer_data[transparent_colors_offset..transparent_colors_offset + transparent_colors_bytes]
-            .copy_from_slice(bytemuck_cast_slice(&transparent_colors));
-        buffer_data
-            [transparent_indices_offset..transparent_indices_offset + transparent_indices_bytes]
-            .copy_from_slice(bytemuck_cast_slice(transparent_indices));
+    // Track mesh data offsets
+    struct MeshOffsets {
+        pos_offset: usize,
+        pos_bytes: usize,
+        norm_offset: usize,
+        norm_bytes: usize,
+        uv_offset: usize,
+        uv_bytes: usize,
+        color_offset: usize,
+        color_bytes: usize,
+        idx_offset: usize,
+        idx_bytes: usize,
+        vertex_count: usize,
+        index_count: usize,
     }
 
-    // Copy texture data
-    buffer_data[aligned_texture_offset..aligned_texture_offset + texture_png.len()]
-        .copy_from_slice(&texture_png);
+    fn write_mesh(buffer: &mut Vec<u8>, mesh: &Mesh) -> Option<MeshOffsets> {
+        if mesh.is_empty() {
+            return None;
+        }
+        let (pos_offset, norm_offset, uv_offset, color_offset, idx_offset) =
+            append_mesh_data(buffer, mesh);
+        let end = buffer.len();
+        Some(MeshOffsets {
+            pos_offset,
+            pos_bytes: norm_offset - pos_offset,
+            norm_offset,
+            norm_bytes: uv_offset - norm_offset,
+            uv_offset,
+            uv_bytes: color_offset - uv_offset,
+            color_offset,
+            color_bytes: idx_offset - color_offset,
+            idx_offset,
+            idx_bytes: end - idx_offset,
+            vertex_count: mesh.vertex_count(),
+            index_count: mesh.indices.len(),
+        })
+    }
 
-    // Calculate combined bounding box
-    let (min, max) = calculate_bounds(opaque_mesh, transparent_mesh);
+    let opaque_offsets = write_mesh(&mut buffer_data, opaque_mesh);
+    let transparent_offsets = write_mesh(&mut buffer_data, transparent_mesh);
 
-    // Build accessors, buffer views, and primitives
+    // Write greedy material mesh data
+    let mut greedy_mesh_offsets: Vec<(Option<MeshOffsets>, Option<MeshOffsets>)> = Vec::new();
+    for gm in &output.greedy_materials {
+        let opaque = write_mesh(&mut buffer_data, &gm.opaque_mesh);
+        let transparent = write_mesh(&mut buffer_data, &gm.transparent_mesh);
+        greedy_mesh_offsets.push((opaque, transparent));
+    }
+
+    // Append atlas texture PNG (aligned to 4 bytes)
+    let texture_padding = (4 - (buffer_data.len() % 4)) % 4;
+    buffer_data.extend(std::iter::repeat(0u8).take(texture_padding));
+    let atlas_texture_offset = buffer_data.len();
+    buffer_data.extend_from_slice(&texture_png);
+
+    // Append greedy texture PNGs (aligned to 4 bytes)
+    let mut greedy_texture_offsets: Vec<(usize, usize)> = Vec::new();
+    for gm in &output.greedy_materials {
+        if gm.texture_png.is_empty() {
+            greedy_texture_offsets.push((0, 0));
+            continue;
+        }
+        let padding = (4 - (buffer_data.len() % 4)) % 4;
+        buffer_data.extend(std::iter::repeat(0u8).take(padding));
+        let offset = buffer_data.len();
+        buffer_data.extend_from_slice(&gm.texture_png);
+        greedy_texture_offsets.push((offset, gm.texture_png.len()));
+    }
+
+    let total_buffer_size = buffer_data.len();
+
+    // Calculate combined bounding box (include greedy meshes)
+    let (min, max) = calculate_bounds_all(output);
+
+    // Build glTF arrays
     let mut accessors = Vec::new();
     let mut buffer_views = Vec::new();
     let mut primitives = Vec::new();
+    let mut images = Vec::new();
+    let mut textures = Vec::new();
+    let mut materials = Vec::new();
 
-    // Buffer view indices
     let mut buffer_view_idx = 0u32;
 
-    // Add opaque mesh data if not empty
-    if !opaque_mesh.is_empty() {
-        let opaque_accessor_start = accessors.len() as u32;
+    // Helper: add buffer views, accessors, and primitive for a mesh
+    fn add_mesh_primitive(
+        offsets: &MeshOffsets,
+        material_idx: u32,
+        bounds_min: [f32; 3],
+        bounds_max: [f32; 3],
+        buffer_views: &mut Vec<json::buffer::View>,
+        accessors: &mut Vec<json::Accessor>,
+        primitives: &mut Vec<json::mesh::Primitive>,
+        buffer_view_idx: &mut u32,
+    ) {
+        let accessor_start = accessors.len() as u32;
 
-        // Buffer views for opaque mesh
-        buffer_views.push(create_buffer_view(
-            opaque_positions_offset,
-            opaque_positions_bytes,
-            Some(json::buffer::Target::ArrayBuffer),
-        ));
-        let opaque_positions_view = buffer_view_idx;
-        buffer_view_idx += 1;
+        // 5 buffer views: positions, normals, uvs, colors, indices
+        buffer_views.push(create_buffer_view(offsets.pos_offset, offsets.pos_bytes, Some(json::buffer::Target::ArrayBuffer)));
+        let pos_view = *buffer_view_idx; *buffer_view_idx += 1;
 
-        buffer_views.push(create_buffer_view(
-            opaque_normals_offset,
-            opaque_normals_bytes,
-            Some(json::buffer::Target::ArrayBuffer),
-        ));
-        let opaque_normals_view = buffer_view_idx;
-        buffer_view_idx += 1;
+        buffer_views.push(create_buffer_view(offsets.norm_offset, offsets.norm_bytes, Some(json::buffer::Target::ArrayBuffer)));
+        let norm_view = *buffer_view_idx; *buffer_view_idx += 1;
 
-        buffer_views.push(create_buffer_view(
-            opaque_uvs_offset,
-            opaque_uvs_bytes,
-            Some(json::buffer::Target::ArrayBuffer),
-        ));
-        let opaque_uvs_view = buffer_view_idx;
-        buffer_view_idx += 1;
+        buffer_views.push(create_buffer_view(offsets.uv_offset, offsets.uv_bytes, Some(json::buffer::Target::ArrayBuffer)));
+        let uv_view = *buffer_view_idx; *buffer_view_idx += 1;
 
-        buffer_views.push(create_buffer_view(
-            opaque_colors_offset,
-            opaque_colors_bytes,
-            Some(json::buffer::Target::ArrayBuffer),
-        ));
-        let opaque_colors_view = buffer_view_idx;
-        buffer_view_idx += 1;
+        buffer_views.push(create_buffer_view(offsets.color_offset, offsets.color_bytes, Some(json::buffer::Target::ArrayBuffer)));
+        let color_view = *buffer_view_idx; *buffer_view_idx += 1;
 
-        buffer_views.push(create_buffer_view(
-            opaque_indices_offset,
-            opaque_indices_bytes,
-            Some(json::buffer::Target::ElementArrayBuffer),
-        ));
-        let opaque_indices_view = buffer_view_idx;
-        buffer_view_idx += 1;
+        buffer_views.push(create_buffer_view(offsets.idx_offset, offsets.idx_bytes, Some(json::buffer::Target::ElementArrayBuffer)));
+        let idx_view = *buffer_view_idx; *buffer_view_idx += 1;
 
-        // Accessors for opaque mesh
-        accessors.push(create_accessor(
-            opaque_positions_view,
-            opaque_mesh.vertex_count(),
-            json::accessor::Type::Vec3,
-            json::accessor::ComponentType::F32,
-            Some(min),
-            Some(max),
-        ));
-        accessors.push(create_accessor(
-            opaque_normals_view,
-            opaque_mesh.vertex_count(),
-            json::accessor::Type::Vec3,
-            json::accessor::ComponentType::F32,
-            None,
-            None,
-        ));
-        accessors.push(create_accessor(
-            opaque_uvs_view,
-            opaque_mesh.vertex_count(),
-            json::accessor::Type::Vec2,
-            json::accessor::ComponentType::F32,
-            None,
-            None,
-        ));
-        accessors.push(create_accessor(
-            opaque_colors_view,
-            opaque_mesh.vertex_count(),
-            json::accessor::Type::Vec4,
-            json::accessor::ComponentType::F32,
-            None,
-            None,
-        ));
-        accessors.push(create_accessor(
-            opaque_indices_view,
-            opaque_indices.len(),
-            json::accessor::Type::Scalar,
-            json::accessor::ComponentType::U32,
-            None,
-            None,
-        ));
+        // 5 accessors
+        accessors.push(create_accessor(pos_view, offsets.vertex_count, json::accessor::Type::Vec3, json::accessor::ComponentType::F32, Some(bounds_min), Some(bounds_max)));
+        accessors.push(create_accessor(norm_view, offsets.vertex_count, json::accessor::Type::Vec3, json::accessor::ComponentType::F32, None, None));
+        accessors.push(create_accessor(uv_view, offsets.vertex_count, json::accessor::Type::Vec2, json::accessor::ComponentType::F32, None, None));
+        accessors.push(create_accessor(color_view, offsets.vertex_count, json::accessor::Type::Vec4, json::accessor::ComponentType::F32, None, None));
+        accessors.push(create_accessor(idx_view, offsets.index_count, json::accessor::Type::Scalar, json::accessor::ComponentType::U32, None, None));
 
-        // Primitive for opaque mesh (material 0 = opaque)
-        primitives.push(create_primitive(
-            opaque_accessor_start,
-            opaque_accessor_start + 4,
-            0, // Opaque material
-        ));
+        primitives.push(create_primitive(accessor_start, accessor_start + 4, material_idx));
     }
 
-    // Add transparent mesh data if not empty
-    if !transparent_mesh.is_empty() {
-        let transparent_accessor_start = accessors.len() as u32;
+    // Material 0: Atlas opaque
+    materials.push(create_material_with_texture(json::material::AlphaMode::Opaque, 0));
+    // Material 1: Atlas transparent
+    materials.push(create_material_with_texture(json::material::AlphaMode::Blend, 0));
 
-        // Buffer views for transparent mesh
-        buffer_views.push(create_buffer_view(
-            transparent_positions_offset,
-            transparent_positions_bytes,
-            Some(json::buffer::Target::ArrayBuffer),
-        ));
-        let transparent_positions_view = buffer_view_idx;
-        buffer_view_idx += 1;
-
-        buffer_views.push(create_buffer_view(
-            transparent_normals_offset,
-            transparent_normals_bytes,
-            Some(json::buffer::Target::ArrayBuffer),
-        ));
-        let transparent_normals_view = buffer_view_idx;
-        buffer_view_idx += 1;
-
-        buffer_views.push(create_buffer_view(
-            transparent_uvs_offset,
-            transparent_uvs_bytes,
-            Some(json::buffer::Target::ArrayBuffer),
-        ));
-        let transparent_uvs_view = buffer_view_idx;
-        buffer_view_idx += 1;
-
-        buffer_views.push(create_buffer_view(
-            transparent_colors_offset,
-            transparent_colors_bytes,
-            Some(json::buffer::Target::ArrayBuffer),
-        ));
-        let transparent_colors_view = buffer_view_idx;
-        buffer_view_idx += 1;
-
-        buffer_views.push(create_buffer_view(
-            transparent_indices_offset,
-            transparent_indices_bytes,
-            Some(json::buffer::Target::ElementArrayBuffer),
-        ));
-        let transparent_indices_view = buffer_view_idx;
-        buffer_view_idx += 1;
-
-        // Accessors for transparent mesh
-        accessors.push(create_accessor(
-            transparent_positions_view,
-            transparent_mesh.vertex_count(),
-            json::accessor::Type::Vec3,
-            json::accessor::ComponentType::F32,
-            Some(min),
-            Some(max),
-        ));
-        accessors.push(create_accessor(
-            transparent_normals_view,
-            transparent_mesh.vertex_count(),
-            json::accessor::Type::Vec3,
-            json::accessor::ComponentType::F32,
-            None,
-            None,
-        ));
-        accessors.push(create_accessor(
-            transparent_uvs_view,
-            transparent_mesh.vertex_count(),
-            json::accessor::Type::Vec2,
-            json::accessor::ComponentType::F32,
-            None,
-            None,
-        ));
-        accessors.push(create_accessor(
-            transparent_colors_view,
-            transparent_mesh.vertex_count(),
-            json::accessor::Type::Vec4,
-            json::accessor::ComponentType::F32,
-            None,
-            None,
-        ));
-        accessors.push(create_accessor(
-            transparent_indices_view,
-            transparent_indices.len(),
-            json::accessor::Type::Scalar,
-            json::accessor::ComponentType::U32,
-            None,
-            None,
-        ));
-
-        // Primitive for transparent mesh (material 1 = blend)
-        primitives.push(create_primitive(
-            transparent_accessor_start,
-            transparent_accessor_start + 4,
-            1, // Transparent material
-        ));
-    }
-
-    // Buffer view for texture
+    // Atlas texture image and glTF texture
     buffer_views.push(json::buffer::View {
         buffer: json::Index::new(0),
         byte_length: USize64(texture_png.len() as u64),
-        byte_offset: Some(USize64(aligned_texture_offset as u64)),
+        byte_offset: Some(USize64(atlas_texture_offset as u64)),
         byte_stride: None,
         extensions: Default::default(),
         extras: Default::default(),
         target: None,
     });
-    let texture_view = buffer_view_idx;
+    let atlas_image_view = buffer_view_idx;
+    buffer_view_idx += 1;
 
-    // Build materials
-    let materials = vec![
-        // Material 0: Opaque
-        create_material(json::material::AlphaMode::Opaque),
-        // Material 1: Transparent (Blend)
-        create_material(json::material::AlphaMode::Blend),
-    ];
+    images.push(json::Image {
+        buffer_view: Some(json::Index::new(atlas_image_view)),
+        mime_type: Some(json::image::MimeType("image/png".to_string())),
+        uri: None,
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+    textures.push(json::Texture {
+        sampler: Some(json::Index::new(0)),
+        source: json::Index::new(0),
+        extensions: Default::default(),
+        extras: Default::default(),
+    });
+
+    // Add atlas-based primitives
+    if let Some(ref offsets) = opaque_offsets {
+        add_mesh_primitive(offsets, 0, min, max, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
+    }
+    if let Some(ref offsets) = transparent_offsets {
+        add_mesh_primitive(offsets, 1, min, max, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
+    }
+
+    // Add greedy material images, textures, materials, and primitives
+    for (i, gm) in output.greedy_materials.iter().enumerate() {
+        let (tex_offset, tex_len) = greedy_texture_offsets[i];
+        if tex_len == 0 {
+            continue;
+        }
+
+        // Add image buffer view
+        buffer_views.push(json::buffer::View {
+            buffer: json::Index::new(0),
+            byte_length: USize64(tex_len as u64),
+            byte_offset: Some(USize64(tex_offset as u64)),
+            byte_stride: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+            target: None,
+        });
+        let img_view = buffer_view_idx;
+        buffer_view_idx += 1;
+
+        let image_idx = images.len() as u32;
+        images.push(json::Image {
+            buffer_view: Some(json::Index::new(img_view)),
+            mime_type: Some(json::image::MimeType("image/png".to_string())),
+            uri: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        let texture_idx = textures.len() as u32;
+        textures.push(json::Texture {
+            sampler: Some(json::Index::new(0)), // Reuse sampler 0 (REPEAT)
+            source: json::Index::new(image_idx),
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        // Opaque material for this greedy texture
+        let opaque_mat_idx = materials.len() as u32;
+        materials.push(create_material_with_texture(json::material::AlphaMode::Opaque, texture_idx));
+
+        // Transparent material for this greedy texture
+        let transparent_mat_idx = materials.len() as u32;
+        materials.push(create_material_with_texture(json::material::AlphaMode::Blend, texture_idx));
+
+        let (ref opaque_off, ref transparent_off) = greedy_mesh_offsets[i];
+
+        if let Some(ref offsets) = opaque_off {
+            add_mesh_primitive(offsets, opaque_mat_idx, min, max, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
+        }
+        if let Some(ref offsets) = transparent_off {
+            add_mesh_primitive(offsets, transparent_mat_idx, min, max, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
+        }
+    }
 
     // Build glTF JSON
     let root = json::Root {
@@ -341,13 +279,7 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
             uri: None,
         }],
         buffer_views,
-        images: vec![json::Image {
-            buffer_view: Some(json::Index::new(texture_view)),
-            mime_type: Some(json::image::MimeType("image/png".to_string())),
-            uri: None,
-            extensions: Default::default(),
-            extras: Default::default(),
-        }],
+        images,
         samplers: vec![json::texture::Sampler {
             mag_filter: Some(Valid(json::texture::MagFilter::Nearest)),
             min_filter: Some(Valid(json::texture::MinFilter::Nearest)),
@@ -356,12 +288,7 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
             extensions: Default::default(),
             extras: Default::default(),
         }],
-        textures: vec![json::Texture {
-            sampler: Some(json::Index::new(0)),
-            source: json::Index::new(0),
-            extensions: Default::default(),
-            extras: Default::default(),
-        }],
+        textures,
         materials,
         meshes: vec![json::Mesh {
             extensions: Default::default(),
@@ -431,12 +358,18 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
     Ok(glb)
 }
 
-/// Calculate bounding box from both meshes.
-fn calculate_bounds(opaque: &Mesh, transparent: &Mesh) -> ([f32; 3], [f32; 3]) {
+/// Calculate bounding box from all meshes in the output.
+fn calculate_bounds_all(output: &MesherOutput) -> ([f32; 3], [f32; 3]) {
     let mut min = [f32::MAX; 3];
     let mut max = [f32::MIN; 3];
 
-    for vertex in opaque.vertices.iter().chain(transparent.vertices.iter()) {
+    let all_vertices = output.opaque_mesh.vertices.iter()
+        .chain(output.transparent_mesh.vertices.iter())
+        .chain(output.greedy_materials.iter().flat_map(|gm| {
+            gm.opaque_mesh.vertices.iter().chain(gm.transparent_mesh.vertices.iter())
+        }));
+
+    for vertex in all_vertices {
         for i in 0..3 {
             min[i] = min[i].min(vertex.position[i]);
             max[i] = max[i].max(vertex.position[i]);
@@ -528,12 +461,12 @@ fn create_primitive(
     }
 }
 
-/// Create a material with the specified alpha mode.
-fn create_material(alpha_mode: json::material::AlphaMode) -> json::Material {
+/// Create a material with the specified alpha mode and texture index.
+fn create_material_with_texture(alpha_mode: json::material::AlphaMode, texture_idx: u32) -> json::Material {
     json::Material {
         pbr_metallic_roughness: json::material::PbrMetallicRoughness {
             base_color_texture: Some(json::texture::Info {
-                index: json::Index::new(0),
+                index: json::Index::new(texture_idx),
                 tex_coord: 0,
                 extensions: Default::default(),
                 extras: Default::default(),
@@ -586,6 +519,7 @@ mod tests {
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
+            greedy_materials: Vec::new(),
         };
 
         let glb = export_glb(&output).unwrap();
@@ -602,6 +536,7 @@ mod tests {
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            greedy_materials: Vec::new(),
         };
 
         let result = export_glb(&output);
@@ -622,6 +557,7 @@ mod tests {
             transparent_mesh: mesh,
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
+            greedy_materials: Vec::new(),
         };
 
         let glb = export_glb(&output).unwrap();

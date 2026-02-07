@@ -95,6 +95,7 @@ mod tests {
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
+            greedy_materials: Vec::new(),
         };
 
         let raw = export_raw(&output);

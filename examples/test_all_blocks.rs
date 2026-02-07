@@ -88,6 +88,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = MesherConfig {
         cull_hidden_faces: true,
+        cull_occluded_blocks: true,
+        greedy_meshing: false,
         atlas_max_size: 256,
         atlas_padding: 1,
         include_air: false,
@@ -211,6 +213,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pack2 = load_resource_pack("pack.zip")?;
     let config2 = MesherConfig {
         cull_hidden_faces: true,
+        cull_occluded_blocks: true,
+        greedy_meshing: false,
         atlas_max_size: 4096,
         atlas_padding: 1,
         include_air: false,

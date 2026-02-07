@@ -5,6 +5,7 @@
 pub mod geometry;
 pub mod element;
 pub mod face_culler;
+pub mod greedy;
 pub mod tint;
 
 pub use geometry::{Mesh, Vertex};
@@ -28,6 +29,11 @@ pub struct MesherConfig {
     pub include_air: bool,
     /// Tint provider for block coloring (grass, foliage, water, redstone, etc.)
     pub tint_provider: TintProvider,
+    /// Skip blocks that are fully hidden by opaque neighbors on all 6 sides.
+    pub cull_occluded_blocks: bool,
+    /// Merge adjacent coplanar faces into larger quads (reduces triangle count).
+    /// Merged faces use separate materials with REPEAT wrapping for proper tiling.
+    pub greedy_meshing: bool,
     /// Enable ambient occlusion.
     pub ambient_occlusion: bool,
     /// AO intensity (0.0 = no darkening, 1.0 = full darkening).
@@ -38,6 +44,8 @@ impl Default for MesherConfig {
     fn default() -> Self {
         Self {
             cull_hidden_faces: true,
+            cull_occluded_blocks: true,
+            greedy_meshing: false,
             atlas_max_size: 4096,
             atlas_padding: 1,
             include_air: false,
@@ -73,30 +81,46 @@ pub struct MesherOutput {
     pub atlas: TextureAtlas,
     /// Bounding box of the mesh.
     pub bounds: BoundingBox,
+    /// Per-texture materials for greedy-merged faces (bypass atlas, use REPEAT wrapping).
+    pub greedy_materials: Vec<element::GreedyMaterial>,
 }
 
 impl MesherOutput {
     /// Get a combined mesh (for backwards compatibility).
     /// Note: For correct transparency, use opaque_mesh and transparent_mesh separately.
+    /// Includes greedy material meshes.
     pub fn mesh(&self) -> Mesh {
         let mut combined = self.opaque_mesh.clone();
         combined.merge(&self.transparent_mesh);
+        for gm in &self.greedy_materials {
+            combined.merge(&gm.opaque_mesh);
+            combined.merge(&gm.transparent_mesh);
+        }
         combined
     }
 
     /// Check if the output has any transparent geometry.
     pub fn has_transparency(&self) -> bool {
         !self.transparent_mesh.is_empty()
+            || self.greedy_materials.iter().any(|gm| !gm.transparent_mesh.is_empty())
     }
 
-    /// Get total vertex count across both meshes.
+    /// Get total vertex count across all meshes.
     pub fn total_vertices(&self) -> usize {
-        self.opaque_mesh.vertex_count() + self.transparent_mesh.vertex_count()
+        self.opaque_mesh.vertex_count()
+            + self.transparent_mesh.vertex_count()
+            + self.greedy_materials.iter().map(|gm| {
+                gm.opaque_mesh.vertex_count() + gm.transparent_mesh.vertex_count()
+            }).sum::<usize>()
     }
 
-    /// Get total triangle count across both meshes.
+    /// Get total triangle count across all meshes.
     pub fn total_triangles(&self) -> usize {
-        self.opaque_mesh.triangle_count() + self.transparent_mesh.triangle_count()
+        self.opaque_mesh.triangle_count()
+            + self.transparent_mesh.triangle_count()
+            + self.greedy_materials.iter().map(|gm| {
+                gm.opaque_mesh.triangle_count() + gm.transparent_mesh.triangle_count()
+            }).sum::<usize>()
     }
 }
 
@@ -155,8 +179,6 @@ impl Mesher {
         blocks: impl Iterator<Item = (BlockPosition, &'a InputBlock)>,
         bounds: BoundingBox,
     ) -> Result<MesherOutput> {
-        let mut mesh_builder = element::MeshBuilder::new(&self.resource_pack, &self.config);
-
         // Collect blocks for face culling
         let blocks: Vec<_> = blocks.collect();
 
@@ -168,23 +190,39 @@ impl Mesher {
             None
         };
 
+        let mut mesh_builder = element::MeshBuilder::new(
+            &self.resource_pack,
+            &self.config,
+            culler.as_ref(),
+        );
+
         // Process each block
         for (pos, block) in &blocks {
             if !self.config.include_air && block.is_air() {
                 continue;
             }
 
-            mesh_builder.add_block(*pos, block, culler.as_ref())?;
+            // Skip blocks that are fully occluded by opaque neighbors
+            if self.config.cull_occluded_blocks {
+                if let Some(ref culler) = culler {
+                    if culler.is_fully_occluded(*pos) {
+                        continue;
+                    }
+                }
+            }
+
+            mesh_builder.add_block(*pos, block)?;
         }
 
         // Build the final meshes and atlas
-        let (opaque_mesh, transparent_mesh, atlas) = mesh_builder.build()?;
+        let (opaque_mesh, transparent_mesh, atlas, greedy_materials) = mesh_builder.build()?;
 
         Ok(MesherOutput {
             opaque_mesh,
             transparent_mesh,
             atlas,
             bounds,
+            greedy_materials,
         })
     }
 }

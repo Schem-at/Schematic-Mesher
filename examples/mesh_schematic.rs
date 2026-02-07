@@ -193,6 +193,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("3. Generating mesh...");
     let config = MesherConfig {
         cull_hidden_faces: true,
+        cull_occluded_blocks: true,
+        greedy_meshing: false,
         atlas_max_size: 4096,
         atlas_padding: 1,
         include_air: false,
@@ -274,6 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 transparent_mesh: schematic_mesher::mesher::geometry::Mesh::new(),
                 atlas: schematic_mesher::atlas::TextureAtlas::empty(),
                 bounds: BoundingBox::new([-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]),
+                greedy_materials: Vec::new(),
             }
         }
     };

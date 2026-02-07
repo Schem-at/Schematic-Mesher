@@ -304,6 +304,14 @@ fn export_output(
             fs::write(&mtl_path, &obj_export.mtl)?;
             fs::write(&png_path, &obj_export.texture_png)?;
 
+            // Write greedy material texture files
+            let parent = obj_path.parent().unwrap_or(std::path::Path::new("."));
+            for tex in &obj_export.greedy_textures {
+                let tex_path = parent.join(&tex.filename);
+                fs::write(&tex_path, &tex.png_data)?;
+                println!("  Greedy texture: {:?}", tex_path);
+            }
+
             println!("Exported OBJ to {:?}", obj_path);
             println!("  Material: {:?}", mtl_path);
             println!("  Texture: {:?}", png_path);

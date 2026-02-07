@@ -242,6 +242,12 @@ impl<'a> FaceCuller<'a> {
         matches!(self.block_types.get(&pos), Some(BlockCullType::Opaque))
     }
 
+    /// Check if a block is fully occluded (all 6 neighbors are fully opaque).
+    /// A fully occluded block can be skipped entirely during meshing.
+    pub fn is_fully_occluded(&self, pos: BlockPosition) -> bool {
+        Direction::ALL.iter().all(|&dir| self.is_fully_opaque_at(pos.neighbor(dir)))
+    }
+
     /// Check if a position is occupied.
     pub fn is_occupied(&self, pos: BlockPosition) -> bool {
         self.occupied.contains(&pos)
@@ -417,6 +423,16 @@ impl FaceCullerSimple {
         }
     }
 
+    /// Check if a position has a fully opaque (non-transparent) block.
+    pub fn is_fully_opaque_at(&self, pos: BlockPosition) -> bool {
+        matches!(self.block_types.get(&pos), Some(SimpleCullType::Opaque))
+    }
+
+    /// Check if a block is fully occluded (all 6 neighbors are fully opaque).
+    pub fn is_fully_occluded(&self, pos: BlockPosition) -> bool {
+        Direction::ALL.iter().all(|&dir| self.is_fully_opaque_at(pos.neighbor(dir)))
+    }
+
     /// Check if a position is occupied.
     pub fn is_occupied(&self, pos: BlockPosition) -> bool {
         self.occupied.contains(&pos)
@@ -504,7 +520,7 @@ fn is_likely_full_cube(name: &str) -> bool {
 }
 
 /// Calculate vertex AO value from neighbor occupancy.
-fn vertex_ao(side1: u8, side2: u8, corner: u8) -> u8 {
+pub fn vertex_ao(side1: u8, side2: u8, corner: u8) -> u8 {
     if side1 == 1 && side2 == 1 {
         0
     } else {
@@ -513,7 +529,7 @@ fn vertex_ao(side1: u8, side2: u8, corner: u8) -> u8 {
 }
 
 /// Get the neighbor offsets for AO calculation for each vertex of a face.
-fn get_ao_neighbors(direction: Direction) -> [([i32; 3], [i32; 3], [i32; 3]); 4] {
+pub fn get_ao_neighbors(direction: Direction) -> [([i32; 3], [i32; 3], [i32; 3]); 4] {
     match direction {
         Direction::Up => [
             ([0, 1, -1], [-1, 1, 0], [-1, 1, -1]),
@@ -659,5 +675,57 @@ mod tests {
             FaceCullerSimple::get_transparent_group_heuristic("stone"),
             None
         );
+    }
+
+    #[test]
+    fn test_is_fully_occluded() {
+        // Create a 3x3x3 cube of stone — the center block should be fully occluded
+        let stones: Vec<InputBlock> = (0..27).map(|_| InputBlock::new("minecraft:stone")).collect();
+        let mut blocks = Vec::new();
+        let mut i = 0;
+        for x in 0..3 {
+            for y in 0..3 {
+                for z in 0..3 {
+                    blocks.push((BlockPosition::new(x, y, z), &stones[i]));
+                    i += 1;
+                }
+            }
+        }
+
+        let culler = FaceCullerSimple::from_blocks(&blocks);
+
+        // Center block (1,1,1) has opaque neighbors on all 6 sides
+        assert!(culler.is_fully_occluded(BlockPosition::new(1, 1, 1)));
+
+        // Corner block (0,0,0) has 3 open faces
+        assert!(!culler.is_fully_occluded(BlockPosition::new(0, 0, 0)));
+
+        // Edge block (1,0,0) has bottom face exposed
+        assert!(!culler.is_fully_occluded(BlockPosition::new(1, 0, 0)));
+
+        // Face block (1,1,0) has north face exposed
+        assert!(!culler.is_fully_occluded(BlockPosition::new(1, 1, 0)));
+    }
+
+    #[test]
+    fn test_is_fully_occluded_with_transparent() {
+        // Glass does not occlude — a block surrounded by glass is NOT occluded
+        let stone = InputBlock::new("minecraft:stone");
+        let glass: Vec<InputBlock> = (0..6).map(|_| InputBlock::new("minecraft:glass")).collect();
+
+        let blocks = vec![
+            (BlockPosition::new(1, 1, 1), &stone),
+            (BlockPosition::new(0, 1, 1), &glass[0]),
+            (BlockPosition::new(2, 1, 1), &glass[1]),
+            (BlockPosition::new(1, 0, 1), &glass[2]),
+            (BlockPosition::new(1, 2, 1), &glass[3]),
+            (BlockPosition::new(1, 1, 0), &glass[4]),
+            (BlockPosition::new(1, 1, 2), &glass[5]),
+        ];
+
+        let culler = FaceCullerSimple::from_blocks(&blocks);
+
+        // Glass is transparent, not fully opaque — so center is NOT occluded
+        assert!(!culler.is_fully_occluded(BlockPosition::new(1, 1, 1)));
     }
 }
