@@ -10,7 +10,9 @@ A Rust library for generating 3D meshes from Minecraft block data. Takes blocks 
 - Transparency handling (separate opaque/transparent geometry)
 - Biome-aware tinting (grass, foliage, water, redstone)
 - Ambient occlusion
-- Multiple output formats: GLB, OBJ, raw mesh data
+- Greedy meshing (merge coplanar faces for lower triangle counts)
+- Occlusion culling (skip fully hidden blocks)
+- Multiple output formats: GLB, OBJ, USDZ, raw mesh data
 - WASM support (optional)
 
 ## Installation
@@ -100,7 +102,7 @@ schematic-mesher info --resource-pack pack.zip
 
 | Option | Description |
 |--------|-------------|
-| `--format` | Output format: `glb` (default), `obj` |
+| `--format` | Output format: `glb` (default), `obj`, `usdz` |
 | `--biome` | Biome for tinting: `plains`, `forest`, `swamp`, etc. |
 | `--no-cull` | Disable face culling |
 | `--no-ao` | Disable ambient occlusion |
@@ -183,6 +185,8 @@ use schematic_mesher::{Mesher, MesherConfig, TintProvider};
 
 let config = MesherConfig {
     cull_hidden_faces: true,      // Remove faces between adjacent blocks
+    cull_occluded_blocks: true,   // Skip blocks with all 6 neighbors opaque
+    greedy_meshing: false,        // Merge coplanar faces into larger quads
     atlas_max_size: 4096,         // Max texture atlas dimension
     atlas_padding: 1,             // Padding between atlas textures
     include_air: false,           // Skip air blocks
@@ -241,6 +245,28 @@ let export = ObjExport::from_output(&output, "my_mesh")?;
 std::fs::write("mesh.obj", &export.obj)?;
 std::fs::write("mesh.mtl", &export.mtl)?;
 std::fs::write("mesh_atlas.png", &export.texture_png)?;
+```
+
+**USDZ (Apple ecosystem / AR Quick Look):**
+
+```rust
+use schematic_mesher::export_usdz;
+
+let usdz_bytes = export_usdz(&output)?;
+std::fs::write("mesh.usdz", usdz_bytes)?;
+```
+
+**USDA (human-readable USD text + textures):**
+
+```rust
+use schematic_mesher::export_usda;
+
+let export = export_usda(&output)?;
+std::fs::write("mesh.usda", &export.usda)?;
+std::fs::write("textures/atlas.png", &export.atlas_png)?;
+for tex in &export.greedy_textures {
+    std::fs::write(&tex.filename, &tex.png_data)?;
+}
 ```
 
 **Raw mesh data:**
