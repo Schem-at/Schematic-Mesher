@@ -115,6 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             enable_block_light: false,
             enable_sky_light: false,
             sky_light_level: 15,
+            enable_particles: false,
         };
         let mesher_off = Mesher::with_config(pack1, config_off);
         let output_off = mesher_off.mesh(&source)?;
@@ -146,6 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             enable_block_light: false,
             enable_sky_light: false,
             sky_light_level: 15,
+            enable_particles: false,
         };
         let mesher_on = Mesher::with_config(pack2, config_on);
         let output_on = mesher_on.mesh(&source)?;
@@ -200,6 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             enable_block_light: false,
             enable_sky_light: false,
             sky_light_level: 15,
+            enable_particles: false,
         };
         let mesher_off = Mesher::with_config(pack1, config_off);
         let output_off = mesher_off.mesh(&source)?;
@@ -230,6 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             enable_block_light: false,
             enable_sky_light: false,
             sky_light_level: 15,
+            enable_particles: false,
         };
         let mesher_on = Mesher::with_config(pack2, config_on);
         let output_on = mesher_on.mesh(&source)?;

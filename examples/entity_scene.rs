@@ -13,9 +13,9 @@ use std::fs;
 use std::path::Path;
 
 fn build_scene(s: &mut Scene) {
-    // Stone floor 24x38
+    // Stone floor 24x48
     for x in 0..24 {
-        for z in 0..38 {
+        for z in 0..48 {
             s.set(x, 0, z, "minecraft:stone");
         }
     }
@@ -77,6 +77,13 @@ fn build_scene(s: &mut Scene) {
     s.set_with(4, 1, 18, "entity:skeleton", &[("facing", "south")]);
     s.set_with(7, 1, 18, "entity:creeper", &[("facing", "south")]);
     s.set_with(10, 1, 18, "entity:pig", &[("facing", "south")]);
+    s.set_with(13, 1, 18, "entity:chicken", &[("facing", "south")]);
+    s.set_with(16, 1, 18, "entity:cow", &[("facing", "south")]);
+    s.set_with(19, 1, 18, "entity:sheep", &[("facing", "south")]);
+    s.set_with(22, 1, 18, "entity:villager", &[("facing", "south")]);
+    // Sheep with wool color
+    s.set_with(19, 1, 19, "entity:sheep", &[("facing", "south"), ("color", "red")]);
+    s.set_with(22, 1, 19, "entity:sheep", &[("facing", "south"), ("color", "blue")]);
 
     // === Section 7 (z=20-22): Shulker Boxes ===
     // Default (purple) + colored variants in different facings
@@ -162,6 +169,75 @@ fn build_scene(s: &mut Scene) {
         ("facing", "south"), ("item", "minecraft:diamond_block"),
     ]);
 
+    // === Section 11 (z=34-36): Banners ===
+    // Plain standing banners
+    s.set_with(1, 1, 34, "minecraft:white_banner", &[("rotation", "0")]);
+    s.set_with(4, 1, 34, "minecraft:red_banner", &[("rotation", "8")]);
+    s.set_with(7, 1, 34, "minecraft:blue_banner", &[("rotation", "4")]);
+
+    // Banner with patterns
+    s.set_with(10, 1, 34, "minecraft:white_banner", &[
+        ("rotation", "0"),
+        ("patterns", "stripe_bottom:red,cross:blue"),
+    ]);
+    s.set_with(13, 1, 34, "minecraft:yellow_banner", &[
+        ("rotation", "0"),
+        ("patterns", "stripe_left:green,stripe_right:green"),
+    ]);
+
+    // Wall banners
+    s.set(1, 2, 37, "minecraft:stone");
+    s.set_with(1, 2, 36, "minecraft:green_wall_banner", &[("facing", "south")]);
+    s.set(4, 2, 37, "minecraft:stone");
+    s.set_with(4, 2, 36, "minecraft:purple_wall_banner", &[
+        ("facing", "south"),
+        ("patterns", "rhombus:yellow"),
+    ]);
+
+    // === Section 12 (z=39-40): Inventory Rendering ===
+    s.set_with(1, 1, 39, "minecraft:chest", &[
+        ("facing", "south"),
+        ("inventory", "diamond_sword,apple,stone:64,,iron_ore:32"),
+    ]);
+    s.set_with(4, 1, 39, "minecraft:chest", &[
+        ("facing", "south"),
+        ("inventory", "oak_planks,diamond_block,gold_ingot,iron_ingot,coal,emerald,redstone,lapis_lazuli,diamond"),
+    ]);
+
+    // === Section 13 (z=42-45): Particles ===
+    // Torches
+    s.set(1, 1, 42, "minecraft:torch");
+    s.set(4, 1, 42, "minecraft:soul_torch");
+
+    // Wall torches (on stone wall at z=43, torches face north away from wall)
+    s.set(7, 2, 43, "minecraft:stone");
+    s.set_with(7, 2, 42, "minecraft:wall_torch", &[("facing", "north")]);
+    s.set(10, 2, 43, "minecraft:stone");
+    s.set_with(10, 2, 42, "minecraft:soul_wall_torch", &[("facing", "north")]);
+
+    // Campfires
+    s.set_with(1, 1, 44, "minecraft:campfire", &[("lit", "true")]);
+    s.set_with(4, 1, 44, "minecraft:soul_campfire", &[("lit", "true")]);
+    s.set_with(7, 1, 44, "minecraft:campfire", &[("lit", "false")]); // unlit, no particles
+
+    // Candles (1-4)
+    s.set_with(10, 1, 44, "minecraft:candle", &[("lit", "true"), ("candles", "1")]);
+    s.set_with(12, 1, 44, "minecraft:red_candle", &[("lit", "true"), ("candles", "2")]);
+    s.set_with(14, 1, 44, "minecraft:blue_candle", &[("lit", "true"), ("candles", "3")]);
+    s.set_with(16, 1, 44, "minecraft:green_candle", &[("lit", "true"), ("candles", "4")]);
+
+    // Lanterns
+    s.set(1, 1, 46, "minecraft:lantern");
+    s.set(4, 1, 46, "minecraft:soul_lantern");
+
+    // End rod
+    s.set_with(7, 1, 46, "minecraft:end_rod", &[("facing", "up")]);
+    s.set_with(10, 1, 46, "minecraft:end_rod", &[("facing", "north")]);
+
+    // Lit furnace
+    s.set_with(13, 1, 46, "minecraft:furnace", &[("facing", "south"), ("lit", "true")]);
+    s.set_with(16, 1, 46, "minecraft:smoker", &[("facing", "south"), ("lit", "true")]);
+
     // === Reference blocks nearby ===
     s.set(22, 1, 1, "minecraft:oak_planks");
     s.set(22, 1, 4, "minecraft:diamond_block");
@@ -182,6 +258,7 @@ fn config() -> MesherConfig {
         enable_block_light: false,
         enable_sky_light: false,
         sky_light_level: 15,
+        enable_particles: true,
     }
 }
 
@@ -244,12 +321,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = mesher.mesh(&scene)?;
 
     println!(
-        "{} tris, {} verts, atlas {}x{}, {} greedy mats",
+        "{} tris, {} verts, atlas {}x{}, {} greedy mats, {} animated textures",
         output.total_triangles(),
         output.total_vertices(),
         output.atlas.width,
         output.atlas.height,
         output.greedy_materials.len(),
+        output.animated_textures.len(),
     );
 
     let glb = export_glb(&output)?;

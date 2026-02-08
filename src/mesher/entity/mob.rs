@@ -1,6 +1,10 @@
 use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose, MobType};
 use super::armor_stand;
+use super::chicken;
+use super::cow;
 use super::minecart;
+use super::sheep;
+use super::villager;
 
 pub(super) fn build_mob_model(mob_type: MobType) -> EntityModelDef {
     match mob_type {
@@ -8,6 +12,10 @@ pub(super) fn build_mob_model(mob_type: MobType) -> EntityModelDef {
         MobType::Skeleton => skeleton_model(),
         MobType::Creeper => creeper_model(),
         MobType::Pig => pig_model(),
+        MobType::Chicken => chicken::chicken_model(),
+        MobType::Cow => cow::cow_model(),
+        MobType::Sheep => sheep::sheep_model(),
+        MobType::Villager => villager::villager_model(),
         MobType::ArmorStand => armor_stand::armor_stand_model(),
         MobType::Minecart => minecart::minecart_model(),
         MobType::ItemFrame | MobType::GlowItemFrame | MobType::DroppedItem => {

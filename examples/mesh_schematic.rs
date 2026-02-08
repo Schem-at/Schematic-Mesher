@@ -204,6 +204,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         enable_block_light: false,
         enable_sky_light: false,
         sky_light_level: 15,
+        enable_particles: true,
     };
 
     let mesher = Mesher::with_config(pack, config);

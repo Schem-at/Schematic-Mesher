@@ -9,7 +9,7 @@ use crate::mesher::entity;
 use crate::mesher::liquid::{self, FluidState};
 use crate::mesher::MesherConfig;
 use crate::resolver::{resolve_block, ModelResolver, ResolvedModel};
-use crate::resource_pack::{ModelElement, ModelFace, ResourcePack};
+use crate::resource_pack::{ModelElement, ModelFace, ResourcePack, TextureData};
 use crate::types::{BlockPosition, BlockTransform, Direction, InputBlock};
 use glam::{Mat3, Vec3};
 use std::collections::{HashMap, HashSet};
@@ -97,6 +97,9 @@ pub struct MeshBuilder<'a> {
     block_map: Option<&'a HashMap<BlockPosition, &'a InputBlock>>,
     /// Light map for brightness calculations.
     light_map: Option<&'a crate::mesher::lighting::LightMap>,
+    /// Dynamic textures generated at build time (banners, inventories).
+    /// Keys starting with `_` are synthetic texture paths.
+    dynamic_textures: HashMap<String, TextureData>,
 }
 
 impl<'a> MeshBuilder<'a> {
@@ -125,6 +128,7 @@ impl<'a> MeshBuilder<'a> {
             resolve_cache: HashMap::new(),
             block_map,
             light_map,
+            dynamic_textures: HashMap::new(),
         }
     }
 
@@ -174,6 +178,18 @@ impl<'a> MeshBuilder<'a> {
         // Check for block entity — generates additive geometry
         if let Some(entity_type) = entity::detect_block_entity(block) {
             self.add_entity(pos, block, &entity_type)?;
+        }
+
+        // Check for inventory property — render hologram above container
+        if let Some(inventory_str) = block.properties.get("inventory") {
+            self.add_inventory_hologram(pos, inventory_str)?;
+        }
+
+        // Check for particle sources (torches, campfires, candles, etc.)
+        if self.config.enable_particles {
+            if let Some(source) = entity::particle::detect_particle_source(block) {
+                self.add_particles(pos, &source)?;
+            }
         }
 
         Ok(())
@@ -243,13 +259,18 @@ impl<'a> MeshBuilder<'a> {
         Ok(())
     }
 
-    /// Add entity geometry for a block entity (chest, bed, bell, sign, skull).
+    /// Add entity geometry for a block entity (chest, bed, bell, sign, skull, banner).
     fn add_entity(
         &mut self,
         pos: BlockPosition,
         block: &InputBlock,
         entity_type: &entity::BlockEntityType,
     ) -> Result<()> {
+        // Banner: composite texture before generating geometry
+        if let entity::BlockEntityType::Banner { color, is_wall } = entity_type {
+            return self.add_banner(pos, block, color, *is_wall);
+        }
+
         let (vertices, indices, face_textures) =
             entity::generate_entity_geometry(block, entity_type);
 
@@ -393,6 +414,46 @@ impl<'a> MeshBuilder<'a> {
             }
         }
 
+        // Sheep: render wool overlay
+        if matches!(mob_type, entity::MobType::Sheep) {
+            let wool_model = crate::mesher::entity::sheep::sheep_wool_model();
+            let facing = block.properties.get("facing")
+                .map(|s| s.as_str())
+                .unwrap_or("south");
+            let facing_angle = entity::facing_rotation_rad(facing);
+            let facing_mat = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+                * glam::Mat4::from_rotation_y(facing_angle)
+                * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+
+            let mut wool_verts = Vec::new();
+            let mut wool_indices = Vec::new();
+            let mut wool_faces = Vec::new();
+
+            entity::traverse_parts(
+                &wool_model.parts,
+                glam::Mat4::IDENTITY,
+                &facing_mat,
+                &wool_model,
+                &mut wool_verts,
+                &mut wool_indices,
+                &mut wool_faces,
+            );
+
+            // Apply dye color tint to wool vertices
+            let dye_color = block.properties.get("color")
+                .map(|c| dye_rgb(c))
+                .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+            for v in &mut wool_verts {
+                v.color[0] *= dye_color[0];
+                v.color[1] *= dye_color[1];
+                v.color[2] *= dye_color[2];
+            }
+
+            if !wool_verts.is_empty() {
+                self.add_item_geometry(pos, &wool_verts, &wool_indices, &wool_faces);
+            }
+        }
+
         // Armor stands: render armor overlay if armor properties are set
         if matches!(mob_type, entity::MobType::ArmorStand) {
             let facing = block.properties.get("facing")
@@ -404,6 +465,204 @@ impl<'a> MeshBuilder<'a> {
                 self.add_item_geometry(pos, &armor_verts, &armor_indices, &armor_faces);
             }
         }
+
+        Ok(())
+    }
+
+    /// Add inventory hologram above a container block.
+    fn add_inventory_hologram(
+        &mut self,
+        pos: BlockPosition,
+        inventory_str: &str,
+    ) -> Result<()> {
+        if let Some((mut verts, indices, mut face_textures, tex_data)) =
+            entity::inventory::render_inventory_hologram(
+                self.resource_pack,
+                &self.model_resolver,
+                inventory_str,
+            )
+        {
+            // Generate unique texture key for this inventory
+            let tex_key = format!("_inventory/{}_{}_{}", pos.x, pos.y, pos.z);
+
+            // Store the composited texture
+            self.dynamic_textures.insert(tex_key.clone(), tex_data);
+
+            // Set the texture path on all face textures
+            for ft in &mut face_textures {
+                ft.texture = tex_key.clone();
+            }
+
+            // Offset vertices to world position
+            for v in &mut verts {
+                v.position[0] += pos.x as f32 - 0.5;
+                v.position[1] += pos.y as f32 - 0.5;
+                v.position[2] += pos.z as f32 - 0.5;
+            }
+
+            // Register texture and add geometry
+            self.texture_refs.insert(tex_key);
+
+            let base_vertex = self.mesh.vertex_count() as u32;
+            let base_index = self.mesh.indices.len();
+
+            for v in &verts {
+                self.mesh.add_vertex(*v);
+            }
+
+            for &idx in &indices {
+                self.mesh.indices.push(base_vertex + idx);
+            }
+
+            let mut idx_offset = base_index;
+            for ft in &face_textures {
+                let face_v_start = (idx_offset - base_index) as u32 / 6 * 4 + base_vertex;
+                self.face_textures.push(FaceTextureMapping {
+                    vertex_start: face_v_start,
+                    index_start: idx_offset,
+                    texture_path: ft.texture.clone(),
+                    is_transparent: ft.is_transparent,
+                });
+                idx_offset += 6;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add static particle marker quads (cross-quads for flames, smoke, etc.).
+    /// Builds animated sprite sheets for particle textures and stores them as
+    /// dynamic textures so the viewer can cycle frames automatically.
+    fn add_particles(
+        &mut self,
+        pos: BlockPosition,
+        source: &entity::particle::ParticleSource,
+    ) -> Result<()> {
+        // Build animated sprite sheets for particle textures (if not already built)
+        for quad in &source.quads {
+            if let Some(anim) = entity::particle::particle_anim_def(quad.texture) {
+                if !self.dynamic_textures.contains_key(anim.key) {
+                    if let Some(tex) = entity::particle::build_particle_sprite_sheet(
+                        self.resource_pack, anim,
+                    ) {
+                        self.dynamic_textures.insert(anim.key.to_string(), tex);
+                    }
+                }
+            }
+        }
+
+        let (vertices, indices, face_textures) =
+            entity::particle::generate_particle_geometry(source);
+
+        if vertices.is_empty() {
+            return Ok(());
+        }
+
+        // Register texture refs using animated key when available
+        for ft in &face_textures {
+            let tex_key = entity::particle::particle_anim_def(&ft.texture)
+                .map(|a| a.key.to_string())
+                .unwrap_or_else(|| ft.texture.clone());
+            self.texture_refs.insert(tex_key);
+        }
+
+        let base_vertex = self.mesh.vertex_count() as u32;
+        let base_index = self.mesh.indices.len();
+
+        for v in &vertices {
+            let mut vertex = *v;
+            vertex.position[0] += pos.x as f32 - 0.5;
+            vertex.position[1] += pos.y as f32 - 0.5;
+            vertex.position[2] += pos.z as f32 - 0.5;
+            self.mesh.add_vertex(vertex);
+        }
+
+        for &idx in &indices {
+            self.mesh.indices.push(base_vertex + idx);
+        }
+
+        let mut idx_offset = base_index;
+        for ft in &face_textures {
+            // Use animated texture key if this particle has an animation def
+            let tex_key = entity::particle::particle_anim_def(&ft.texture)
+                .map(|a| a.key.to_string())
+                .unwrap_or_else(|| ft.texture.clone());
+            let face_v_start = (idx_offset - base_index) as u32 / 6 * 4 + base_vertex;
+            self.face_textures.push(FaceTextureMapping {
+                vertex_start: face_v_start,
+                index_start: idx_offset,
+                texture_path: tex_key,
+                is_transparent: ft.is_transparent,
+            });
+            idx_offset += 6;
+        }
+
+        Ok(())
+    }
+
+    /// Add banner entity geometry with composited texture.
+    fn add_banner(
+        &mut self,
+        pos: BlockPosition,
+        block: &InputBlock,
+        base_color: &str,
+        is_wall: bool,
+    ) -> Result<()> {
+        // Parse pattern property
+        let patterns = block.properties.get("patterns")
+            .map(|s| entity::banner::parse_patterns(s))
+            .unwrap_or_default();
+
+        // Create a cache key for this banner's texture
+        let mut tex_key = format!("_banner/{}", base_color);
+        for (p, c) in &patterns {
+            tex_key.push_str(&format!("_{}{}", p, c));
+        }
+
+        // Composite the texture if not already cached
+        if !self.dynamic_textures.contains_key(&tex_key) {
+            if let Some(tex) = entity::banner::composite_banner_texture(
+                self.resource_pack,
+                base_color,
+                &patterns,
+            ) {
+                self.dynamic_textures.insert(tex_key.clone(), tex);
+            }
+        }
+
+        // Build the banner model with the composited texture path
+        let model = entity::banner::banner_model(!is_wall, &tex_key);
+
+        // Compute facing
+        let facing = entity::get_facing(block);
+        let facing_angle = if !is_wall {
+            entity::standing_rotation_rad(block)
+        } else {
+            entity::facing_rotation_rad(facing)
+        };
+        let facing_mat = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+            * glam::Mat4::from_rotation_y(facing_angle)
+            * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut face_textures = Vec::new();
+
+        entity::traverse_parts(
+            &model.parts,
+            glam::Mat4::IDENTITY,
+            &facing_mat,
+            &model,
+            &mut vertices,
+            &mut indices,
+            &mut face_textures,
+        );
+
+        if vertices.is_empty() {
+            return Ok(());
+        }
+
+        self.add_item_geometry(pos, &vertices, &indices, &face_textures);
 
         Ok(())
     }
@@ -990,10 +1249,11 @@ impl<'a> MeshBuilder<'a> {
     }
 
     /// Build the final meshes (opaque, cutout, and transparent) and atlas.
-    /// Returns (opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials).
+    /// Returns (opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials, animated_exports).
     /// Render order: opaque first, then cutout (alpha-tested), then transparent (alpha-blended).
     /// Greedy materials have their own textures with REPEAT wrapping for tiling.
-    pub fn build(mut self) -> Result<(Mesh, Mesh, Mesh, TextureAtlas, Vec<GreedyMaterial>)> {
+    /// Animated exports contain sprite sheets from dynamic textures (particles, etc.).
+    pub fn build(mut self) -> Result<(Mesh, Mesh, Mesh, TextureAtlas, Vec<GreedyMaterial>, Vec<super::AnimatedTextureExport>)> {
         // Emit greedy-merged quads into the mesh before atlas building
         self.emit_greedy_quads();
 
@@ -1004,7 +1264,10 @@ impl<'a> MeshBuilder<'a> {
         );
 
         for texture_ref in &self.texture_refs {
-            if let Some(texture) = self.resource_pack.get_texture(texture_ref) {
+            // Check dynamic textures first, then resource pack
+            if let Some(texture) = self.dynamic_textures.get(texture_ref) {
+                atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
+            } else if let Some(texture) = self.resource_pack.get_texture(texture_ref) {
                 atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
             }
         }
@@ -1032,7 +1295,41 @@ impl<'a> MeshBuilder<'a> {
         // Build greedy materials: group greedy faces by texture path
         let greedy_materials = self.build_greedy_materials();
 
-        Ok((opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials))
+        // Collect animated texture exports from dynamic textures (particles, etc.)
+        let mut animated_exports = Vec::new();
+        for (key, tex) in &self.dynamic_textures {
+            if tex.is_animated && tex.frame_count > 1 {
+                if let Some(region) = atlas.get_region(key) {
+                    let sprite_sheet_png = match tex.to_png() {
+                        Ok(png) => png,
+                        Err(_) => continue,
+                    };
+                    let anim = tex.animation.as_ref();
+                    let frame_width = anim.and_then(|a| a.frame_width).unwrap_or(tex.width);
+                    let frame_height = anim.and_then(|a| a.frame_height).unwrap_or(frame_width);
+                    let frametime = anim.map(|a| a.frametime).unwrap_or(1);
+                    let interpolate = anim.map(|a| a.interpolate).unwrap_or(false);
+                    let frames = anim.and_then(|a| a.frames.as_ref()).map(|fs| {
+                        fs.iter().map(|f| f.index).collect()
+                    });
+                    let atlas_x = (region.u_min * atlas.width as f32).round() as u32;
+                    let atlas_y = (region.v_min * atlas.height as f32).round() as u32;
+                    animated_exports.push(super::AnimatedTextureExport {
+                        sprite_sheet_png,
+                        frame_count: tex.frame_count,
+                        frametime,
+                        interpolate,
+                        frames,
+                        frame_width,
+                        frame_height,
+                        atlas_x,
+                        atlas_y,
+                    });
+                }
+            }
+        }
+
+        Ok((opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials, animated_exports))
     }
 
     /// Build per-texture GreedyMaterial meshes from greedy faces.
@@ -1250,6 +1547,29 @@ fn bake_ao_into_tile(
     img.write_to(&mut cursor, image::ImageFormat::Png)
         .expect("Failed to encode AO-baked tile as PNG");
     bytes
+}
+
+/// Standard Minecraft dye color RGB values.
+fn dye_rgb(color: &str) -> [f32; 4] {
+    match color {
+        "white" => [1.0, 1.0, 1.0, 1.0],
+        "orange" => [0.85, 0.52, 0.18, 1.0],
+        "magenta" => [0.70, 0.33, 0.85, 1.0],
+        "light_blue" => [0.40, 0.60, 0.85, 1.0],
+        "yellow" => [0.96, 0.86, 0.26, 1.0],
+        "lime" => [0.50, 0.80, 0.10, 1.0],
+        "pink" => [0.95, 0.55, 0.65, 1.0],
+        "gray" => [0.37, 0.42, 0.46, 1.0],
+        "light_gray" => [0.60, 0.60, 0.55, 1.0],
+        "cyan" => [0.10, 0.55, 0.60, 1.0],
+        "purple" => [0.50, 0.25, 0.70, 1.0],
+        "blue" => [0.20, 0.25, 0.70, 1.0],
+        "brown" => [0.50, 0.32, 0.20, 1.0],
+        "green" => [0.35, 0.45, 0.14, 1.0],
+        "red" => [0.70, 0.20, 0.20, 1.0],
+        "black" => [0.10, 0.10, 0.13, 1.0],
+        _ => [1.0, 1.0, 1.0, 1.0],
+    }
 }
 
 #[cfg(test)]

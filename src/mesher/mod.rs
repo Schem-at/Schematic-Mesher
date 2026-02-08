@@ -47,6 +47,8 @@ pub struct MesherConfig {
     pub enable_sky_light: bool,
     /// Sky light level (0-15, default 15 for daytime).
     pub sky_light_level: u8,
+    /// Enable static particle marker quads (torches, campfires, candles, etc.).
+    pub enable_particles: bool,
 }
 
 impl Default for MesherConfig {
@@ -64,6 +66,7 @@ impl Default for MesherConfig {
             enable_block_light: false,
             enable_sky_light: false,
             sky_light_level: 15,
+            enable_particles: true,
         }
     }
 }
@@ -279,10 +282,11 @@ impl Mesher {
         }
 
         // Build the final meshes and atlas
-        let (opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials) = mesh_builder.build()?;
+        let (opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials, dynamic_animated) = mesh_builder.build()?;
 
         // Collect animated texture metadata for viewer-side frame cycling
-        let animated_textures = Self::collect_animated_textures(&self.resource_pack, &atlas);
+        let mut animated_textures = Self::collect_animated_textures(&self.resource_pack, &atlas);
+        animated_textures.extend(dynamic_animated);
 
         Ok(MesherOutput {
             opaque_mesh,

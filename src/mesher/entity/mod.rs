@@ -8,16 +8,23 @@
 //! vertices/indices/face textures, then integrate in MeshBuilder::add_block().
 
 pub mod armor_stand;
+pub(crate) mod banner;
 mod bed;
 mod bell;
+mod chicken;
 mod chest;
+mod cow;
 mod item_frame;
+pub(crate) mod inventory;
 pub mod item_render;
 mod minecart;
 mod mob;
+pub(crate) mod particle;
+pub(crate) mod sheep;
 mod shulker;
 mod sign;
 mod skull;
+mod villager;
 
 use crate::mesher::geometry::Vertex;
 use crate::types::{Direction, InputBlock};
@@ -123,6 +130,7 @@ pub enum BlockEntityType {
     Sign { wood: SignWood, is_wall: bool },
     Skull(SkullType),
     ShulkerBox { color: Option<String> },
+    Banner { color: String, is_wall: bool },
 }
 
 /// Mob entity types (rendered as static models).
@@ -132,6 +140,10 @@ pub enum MobType {
     Skeleton,
     Creeper,
     Pig,
+    Chicken,
+    Cow,
+    Sheep,
+    Villager,
     ArmorStand,
     Minecart,
     ItemFrame,
@@ -223,6 +235,17 @@ pub fn detect_block_entity(block: &InputBlock) -> Option<BlockEntityType> {
         "player_head" | "player_wall_head" =>
             Some(BlockEntityType::Skull(SkullType::Skeleton)), // fallback texture
 
+        // Banners
+        id if id.ends_with("_banner") || id.ends_with("_wall_banner") => {
+            let is_wall = id.contains("wall_banner");
+            let color = if is_wall {
+                id.strip_suffix("_wall_banner").unwrap_or("white").to_string()
+            } else {
+                id.strip_suffix("_banner").unwrap_or("white").to_string()
+            };
+            Some(BlockEntityType::Banner { color, is_wall })
+        }
+
         // Shulker Boxes
         "shulker_box" => Some(BlockEntityType::ShulkerBox { color: None }),
         id if id.ends_with("_shulker_box") => {
@@ -242,6 +265,10 @@ pub fn detect_mob(block: &InputBlock) -> Option<MobType> {
         "skeleton" => Some(MobType::Skeleton),
         "creeper" => Some(MobType::Creeper),
         "pig" => Some(MobType::Pig),
+        "chicken" => Some(MobType::Chicken),
+        "cow" => Some(MobType::Cow),
+        "sheep" => Some(MobType::Sheep),
+        "villager" => Some(MobType::Villager),
         "armor_stand" => Some(MobType::ArmorStand),
         "minecart" => Some(MobType::Minecart),
         "item_frame" => Some(MobType::ItemFrame),
@@ -262,14 +289,14 @@ fn detect_double_chest(block: &InputBlock) -> Option<DoubleChestSide> {
 // ── Facing Helpers ──────────────────────────────────────────────────────────
 
 /// Get facing direction from block properties. Defaults to north.
-fn get_facing(block: &InputBlock) -> &str {
+pub(crate) fn get_facing(block: &InputBlock) -> &str {
     block.properties.get("facing").map(|s| s.as_str()).unwrap_or("north")
 }
 
 /// Y rotation angle for a facing direction (radians).
 /// In Minecraft, entity models face south by default (toward +Z).
 /// North = 180deg, South = 0deg, East = -90deg (270), West = 90deg.
-fn facing_rotation_rad(facing: &str) -> f32 {
+pub(crate) fn facing_rotation_rad(facing: &str) -> f32 {
     match facing {
         "north" => std::f32::consts::PI,
         "south" => 0.0,
@@ -280,7 +307,7 @@ fn facing_rotation_rad(facing: &str) -> f32 {
 }
 
 /// Standing sign/skull rotation from `rotation` property (0-15, each = 22.5 degrees).
-fn standing_rotation_rad(block: &InputBlock) -> f32 {
+pub(crate) fn standing_rotation_rad(block: &InputBlock) -> f32 {
     let rot: u8 = block.properties.get("rotation")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
@@ -386,6 +413,7 @@ pub fn generate_entity_geometry(
     } else {
         // Standard Y-rotation around (0.5, 0, 0.5)
         let facing_angle = match entity_type {
+            BlockEntityType::Banner { is_wall: false, .. } => standing_rotation_rad(block),
             BlockEntityType::Sign { is_wall: false, .. } => standing_rotation_rad(block),
             BlockEntityType::Skull(_) => {
                 let block_id = block.block_id();
@@ -462,7 +490,7 @@ pub fn generate_mob_geometry(
 }
 
 /// Recursively traverse part hierarchy, accumulating transforms.
-fn traverse_parts(
+pub(crate) fn traverse_parts(
     parts: &[EntityPart],
     parent_transform: Mat4,
     facing_mat: &Mat4,
@@ -629,6 +657,10 @@ fn build_model_def(entity_type: &BlockEntityType) -> EntityModelDef {
         BlockEntityType::Sign { wood, is_wall } => sign::sign_model(*wood, *is_wall),
         BlockEntityType::Skull(skull_type) => skull::skull_model(*skull_type),
         BlockEntityType::ShulkerBox { color } => shulker::shulker_model(color.as_deref()),
+        BlockEntityType::Banner { is_wall, .. } => {
+            // Texture path will be overridden by dynamic texture in add_entity
+            banner::banner_model(!is_wall, "_banner/default")
+        }
     }
 }
 
@@ -981,5 +1013,93 @@ mod tests {
         assert_eq!(faces.len(), 22);
         assert_eq!(verts.len(), 22 * 4);
         assert_eq!(indices.len(), 22 * 6);
+    }
+
+    #[test]
+    fn test_detect_new_mobs() {
+        assert!(matches!(detect_mob(&InputBlock::new("entity:chicken")), Some(MobType::Chicken)));
+        assert!(matches!(detect_mob(&InputBlock::new("entity:cow")), Some(MobType::Cow)));
+        assert!(matches!(detect_mob(&InputBlock::new("entity:sheep")), Some(MobType::Sheep)));
+        assert!(matches!(detect_mob(&InputBlock::new("entity:villager")), Some(MobType::Villager)));
+    }
+
+    #[test]
+    fn test_chicken_geometry_count() {
+        let block = InputBlock::new("entity:chicken")
+            .with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Chicken);
+
+        // Chicken: 7 parts (head with beak+wattle children, body, 2 legs, 2 wings) = 8 cubes × 6 = 48 faces
+        assert_eq!(faces.len(), 48);
+        assert_eq!(verts.len(), 48 * 4);
+        assert_eq!(indices.len(), 48 * 6);
+    }
+
+    #[test]
+    fn test_cow_geometry_count() {
+        let block = InputBlock::new("entity:cow")
+            .with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Cow);
+
+        // Cow: 8 parts (head with 2 horn children, body, 4 legs) = 8 cubes × 6 = 48 faces
+        assert_eq!(faces.len(), 48);
+        assert_eq!(verts.len(), 48 * 4);
+        assert_eq!(indices.len(), 48 * 6);
+    }
+
+    #[test]
+    fn test_sheep_geometry_count() {
+        let block = InputBlock::new("entity:sheep")
+            .with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Sheep);
+
+        // Sheep base: 6 parts (head, body, 4 legs) × 6 faces = 36 faces
+        assert_eq!(faces.len(), 36);
+        assert_eq!(verts.len(), 36 * 4);
+        assert_eq!(indices.len(), 36 * 6);
+    }
+
+    #[test]
+    fn test_villager_geometry_count() {
+        let block = InputBlock::new("entity:villager")
+            .with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Villager);
+
+        // Villager: head(1) + hat(1) + hat_rim(1) + nose(1) + body(1) + jacket(1) + arms(3) + 2 legs = 11 cubes × 6 = 66 faces
+        assert_eq!(faces.len(), 66);
+        assert_eq!(verts.len(), 66 * 4);
+        assert_eq!(indices.len(), 66 * 6);
+    }
+
+    #[test]
+    fn test_detect_banner() {
+        let block = InputBlock::new("minecraft:white_banner");
+        match detect_block_entity(&block) {
+            Some(BlockEntityType::Banner { color, is_wall }) => {
+                assert_eq!(color, "white");
+                assert!(!is_wall);
+            }
+            _ => panic!("Expected Banner entity"),
+        }
+
+        let block = InputBlock::new("minecraft:red_wall_banner");
+        match detect_block_entity(&block) {
+            Some(BlockEntityType::Banner { color, is_wall }) => {
+                assert_eq!(color, "red");
+                assert!(is_wall);
+            }
+            _ => panic!("Expected Wall Banner entity"),
+        }
+    }
+
+    #[test]
+    fn test_parse_patterns() {
+        let patterns = banner::parse_patterns("stripe_bottom:red,cross:blue");
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0], ("stripe_bottom".to_string(), "red".to_string()));
+        assert_eq!(patterns[1], ("cross".to_string(), "blue".to_string()));
+
+        let empty = banner::parse_patterns("");
+        assert!(empty.is_empty());
     }
 }

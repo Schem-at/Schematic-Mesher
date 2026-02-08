@@ -311,6 +311,7 @@ fn main() {
                 enable_block_light: false,
                 enable_sky_light: false,
                 sky_light_level: 15,
+                enable_particles: false,
             },
         ),
         (
@@ -328,6 +329,7 @@ fn main() {
                 enable_block_light: false,
                 enable_sky_light: false,
                 sky_light_level: 15,
+                enable_particles: false,
             },
         ),
     ];
