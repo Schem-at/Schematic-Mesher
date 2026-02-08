@@ -92,10 +92,12 @@ mod tests {
 
         let output = MesherOutput {
             opaque_mesh: mesh,
+            cutout_mesh: Mesh::new(),
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
             greedy_materials: Vec::new(),
+            animated_textures: Vec::new(),
         };
 
         let raw = export_raw(&output);

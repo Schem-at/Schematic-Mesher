@@ -2,7 +2,7 @@
 
 use super::{BlockModel, BlockstateDefinition, ResourcePack, TextureData};
 use crate::error::{MesherError, Result};
-use crate::resource_pack::texture::load_texture_from_bytes;
+use crate::resource_pack::texture::{load_texture_from_bytes, parse_mcmeta};
 use std::io::Read;
 use std::path::Path;
 
@@ -26,6 +26,10 @@ pub fn load_from_bytes(data: &[u8]) -> Result<ResourcePack> {
     let mut archive = zip::ZipArchive::new(cursor)?;
 
     let mut pack = ResourcePack::new();
+
+    // Collect .png.mcmeta entries to apply after all textures are loaded
+    // (ZIP entry order is arbitrary, mcmeta may appear before its PNG)
+    let mut pending_mcmeta: Vec<(String, String, crate::resource_pack::texture::AnimationMeta)> = Vec::new();
 
     // Iterate through all files in the archive
     for i in 0..archive.len() {
@@ -80,7 +84,15 @@ pub fn load_from_bytes(data: &[u8]) -> Result<ResourcePack> {
                     }
                 }
                 "textures" => {
-                    if asset_path.ends_with(".png") {
+                    if asset_path.ends_with(".png.mcmeta") {
+                        // Parse .mcmeta and defer application until all textures are loaded
+                        let mut contents = String::new();
+                        file.read_to_string(&mut contents)?;
+                        let texture_path = asset_path.trim_end_matches(".png.mcmeta");
+                        if let Some(meta) = parse_mcmeta(&contents) {
+                            pending_mcmeta.push((namespace.to_string(), texture_path.to_string(), meta));
+                        }
+                    } else if asset_path.ends_with(".png") {
                         let mut data = Vec::new();
                         file.read_to_end(&mut data)?;
 
@@ -99,6 +111,15 @@ pub fn load_from_bytes(data: &[u8]) -> Result<ResourcePack> {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    // Apply mcmeta metadata to loaded textures
+    for (namespace, texture_path, meta) in pending_mcmeta {
+        if let Some(ns_textures) = pack.textures.get_mut(&namespace) {
+            if let Some(texture) = ns_textures.get_mut(&texture_path) {
+                texture.apply_mcmeta(meta);
             }
         }
     }
@@ -159,6 +180,22 @@ fn load_from_directory(path: &Path) -> Result<ResourcePack> {
                     pack.add_texture(&namespace, texture_path, texture);
                 }
             })?;
+
+            // Load .png.mcmeta files and apply to textures
+            let mut pending_mcmeta = Vec::new();
+            load_mcmeta_files_recursive(&textures_path, &textures_path, &mut |texture_path, contents| {
+                if let Some(meta) = parse_mcmeta(contents) {
+                    pending_mcmeta.push((texture_path.to_string(), meta));
+                }
+            })?;
+
+            for (texture_path, meta) in pending_mcmeta {
+                if let Some(ns_textures) = pack.textures.get_mut(&namespace) {
+                    if let Some(texture) = ns_textures.get_mut(&texture_path) {
+                        texture.apply_mcmeta(meta);
+                    }
+                }
+            }
         }
     }
 
@@ -258,6 +295,39 @@ where
 
             let data = std::fs::read(&path)?;
             handler(&relative, &data);
+        }
+    }
+    Ok(())
+}
+
+/// Load .png.mcmeta files recursively from a directory.
+fn load_mcmeta_files_recursive<F>(
+    base: &Path,
+    dir: &Path,
+    handler: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&str, &str),
+{
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            load_mcmeta_files_recursive(base, &path, handler)?;
+        } else {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if name.ends_with(".png.mcmeta") {
+                // Strip ".png.mcmeta" to get the texture path relative to base
+                let relative = path
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let texture_path = relative.trim_end_matches(".png.mcmeta");
+                let contents = std::fs::read_to_string(&path)?;
+                handler(texture_path, &contents);
+            }
         }
     }
     Ok(())

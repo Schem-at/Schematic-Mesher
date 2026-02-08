@@ -217,6 +217,14 @@ impl<'a> FaceCuller<'a> {
         // Extract the base block name without namespace
         let block_id = name.split(':').nth(1).unwrap_or(name);
 
+        // Fluid blocks — transparent for face culling (not full-height cubes)
+        if block_id == "water" {
+            return Some("water".to_string());
+        }
+        if block_id == "lava" {
+            return Some("lava".to_string());
+        }
+
         // Glass blocks - all glass variants cull against each other
         if block_id == "glass" || block_id.ends_with("_glass") {
             // Group all stained glass together, but separate from regular glass
@@ -456,6 +464,14 @@ impl FaceCullerSimple {
 
     /// Get transparent group using heuristics.
     fn get_transparent_group_heuristic(block_id: &str) -> Option<String> {
+        // Fluid blocks
+        if block_id == "water" {
+            return Some("water".to_string());
+        }
+        if block_id == "lava" {
+            return Some("lava".to_string());
+        }
+
         // Glass blocks
         if block_id == "glass" || block_id.ends_with("_glass") {
             if block_id.contains("stained") {
@@ -578,6 +594,17 @@ fn is_likely_full_cube(name: &str) -> bool {
         return false;
     }
 
+    // Fluids are never full cubes (variable height)
+    let block_id = name.split(':').nth(1).unwrap_or(name);
+    if block_id == "water" || block_id == "lava" {
+        return false;
+    }
+
+    // Entity namespace blocks (mobs) are never full cubes
+    if name.starts_with("entity:") {
+        return false;
+    }
+
     // Common patterns for non-full blocks
     let non_full_patterns = [
         "slab", "stairs", "fence", "wall", "door", "trapdoor",
@@ -596,6 +623,8 @@ fn is_likely_full_cube(name: &str) -> bool {
         "carrots", "potatoes", "beetroots", "cocoa", "cactus",
         "sugar_cane", "bamboo", "kelp", "seagrass", "lichen",
         "vein", "fire", "snow", "layer",
+        // Block entities with non-full geometry
+        "_bed", "chest",
         // Specific flowers that don't have "flower" in name
         "poppy", "dandelion", "orchid", "allium", "tulip",
         "oxeye_daisy", "cornflower", "lily_of_the_valley",

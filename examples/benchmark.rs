@@ -308,6 +308,9 @@ fn main() {
                 atlas_padding: 1,
                 include_air: false,
                 tint_provider: schematic_mesher::TintProvider::new(),
+                enable_block_light: false,
+                enable_sky_light: false,
+                sky_light_level: 15,
             },
         ),
         (
@@ -322,6 +325,9 @@ fn main() {
                 atlas_padding: 1,
                 include_air: false,
                 tint_provider: schematic_mesher::TintProvider::new(),
+                enable_block_light: false,
+                enable_sky_light: false,
+                sky_light_level: 15,
             },
         ),
     ];

@@ -4,8 +4,11 @@
 
 pub mod geometry;
 pub mod element;
+pub mod entity;
 pub mod face_culler;
 pub mod greedy;
+pub mod lighting;
+pub mod liquid;
 pub mod tint;
 
 pub use geometry::{Mesh, Vertex};
@@ -38,6 +41,12 @@ pub struct MesherConfig {
     pub ambient_occlusion: bool,
     /// AO intensity (0.0 = no darkening, 1.0 = full darkening).
     pub ao_intensity: f32,
+    /// Enable block light (torches, glowstone, etc.).
+    pub enable_block_light: bool,
+    /// Enable sky light (sunlight from above).
+    pub enable_sky_light: bool,
+    /// Sky light level (0-15, default 15 for daytime).
+    pub sky_light_level: u8,
 }
 
 impl Default for MesherConfig {
@@ -52,6 +61,9 @@ impl Default for MesherConfig {
             tint_provider: TintProvider::new(),
             ambient_occlusion: true,
             ao_intensity: 0.4,
+            enable_block_light: false,
+            enable_sky_light: false,
+            sky_light_level: 15,
         }
     }
 }
@@ -70,12 +82,39 @@ impl MesherConfig {
     }
 }
 
+/// Animation metadata for a texture in the atlas, exported for viewer-side frame cycling.
+#[derive(Debug, Clone)]
+pub struct AnimatedTextureExport {
+    /// The sprite sheet PNG (all frames stacked vertically).
+    pub sprite_sheet_png: Vec<u8>,
+    /// Number of animation frames.
+    pub frame_count: u32,
+    /// Ticks per frame (Minecraft default: 1 tick = 50ms).
+    pub frametime: u32,
+    /// Whether to interpolate between frames.
+    pub interpolate: bool,
+    /// Explicit frame order (indices into sprite sheet). None = sequential.
+    pub frames: Option<Vec<u32>>,
+    /// Frame width in pixels.
+    pub frame_width: u32,
+    /// Frame height in pixels.
+    pub frame_height: u32,
+    /// Atlas region: pixel X offset.
+    pub atlas_x: u32,
+    /// Atlas region: pixel Y offset.
+    pub atlas_y: u32,
+}
+
 /// Output from the mesher.
 #[derive(Debug)]
 pub struct MesherOutput {
-    /// The opaque geometry mesh (rendered first).
+    /// The opaque geometry mesh (rendered first, backface culled).
     pub opaque_mesh: Mesh,
-    /// The transparent geometry mesh (rendered second).
+    /// Binary-alpha geometry mesh (rendered second, alpha-tested, writes depth).
+    /// Used for fire, flowers, leaves, etc. where pixels are fully opaque or fully transparent.
+    pub cutout_mesh: Mesh,
+    /// The semi-transparent geometry mesh (rendered last, alpha-blended, no depth write).
+    /// Used for water, ice, stained glass, etc.
     pub transparent_mesh: Mesh,
     /// The texture atlas.
     pub atlas: TextureAtlas,
@@ -83,14 +122,17 @@ pub struct MesherOutput {
     pub bounds: BoundingBox,
     /// Per-texture materials for greedy-merged faces (bypass atlas, use REPEAT wrapping).
     pub greedy_materials: Vec<element::GreedyMaterial>,
+    /// Animated texture metadata for viewer-side frame cycling.
+    pub animated_textures: Vec<AnimatedTextureExport>,
 }
 
 impl MesherOutput {
     /// Get a combined mesh (for backwards compatibility).
-    /// Note: For correct transparency, use opaque_mesh and transparent_mesh separately.
+    /// Note: For correct transparency, use opaque_mesh, cutout_mesh, and transparent_mesh separately.
     /// Includes greedy material meshes.
     pub fn mesh(&self) -> Mesh {
         let mut combined = self.opaque_mesh.clone();
+        combined.merge(&self.cutout_mesh);
         combined.merge(&self.transparent_mesh);
         for gm in &self.greedy_materials {
             combined.merge(&gm.opaque_mesh);
@@ -99,15 +141,17 @@ impl MesherOutput {
         combined
     }
 
-    /// Check if the output has any transparent geometry.
+    /// Check if the output has any transparent or cutout geometry.
     pub fn has_transparency(&self) -> bool {
-        !self.transparent_mesh.is_empty()
+        !self.cutout_mesh.is_empty()
+            || !self.transparent_mesh.is_empty()
             || self.greedy_materials.iter().any(|gm| !gm.transparent_mesh.is_empty())
     }
 
     /// Get total vertex count across all meshes.
     pub fn total_vertices(&self) -> usize {
         self.opaque_mesh.vertex_count()
+            + self.cutout_mesh.vertex_count()
             + self.transparent_mesh.vertex_count()
             + self.greedy_materials.iter().map(|gm| {
                 gm.opaque_mesh.vertex_count() + gm.transparent_mesh.vertex_count()
@@ -117,6 +161,7 @@ impl MesherOutput {
     /// Get total triangle count across all meshes.
     pub fn total_triangles(&self) -> usize {
         self.opaque_mesh.triangle_count()
+            + self.cutout_mesh.triangle_count()
             + self.transparent_mesh.triangle_count()
             + self.greedy_materials.iter().map(|gm| {
                 gm.opaque_mesh.triangle_count() + gm.transparent_mesh.triangle_count()
@@ -182,6 +227,10 @@ impl Mesher {
         // Collect blocks for face culling
         let blocks: Vec<_> = blocks.collect();
 
+        // Build block map for neighbor lookups (used by liquid geometry)
+        let block_map: std::collections::HashMap<BlockPosition, &InputBlock> =
+            blocks.iter().map(|(pos, block)| (*pos, *block)).collect();
+
         // Build occupancy map for face culling if enabled
         // Uses model data to determine which blocks are full opaque cubes
         let culler = if self.config.cull_hidden_faces {
@@ -190,10 +239,25 @@ impl Mesher {
             None
         };
 
+        // Build light map if lighting is enabled
+        let lighting_config = lighting::LightingConfig {
+            enable_block_light: self.config.enable_block_light,
+            enable_sky_light: self.config.enable_sky_light,
+            sky_light_level: self.config.sky_light_level,
+            ambient_light: 0.05,
+        };
+        let light_map = if lighting_config.is_enabled() {
+            Some(lighting::LightMap::compute(&blocks, &lighting_config))
+        } else {
+            None
+        };
+
         let mut mesh_builder = element::MeshBuilder::new(
             &self.resource_pack,
             &self.config,
             culler.as_ref(),
+            Some(&block_map),
+            light_map.as_ref(),
         );
 
         // Process each block
@@ -215,14 +279,67 @@ impl Mesher {
         }
 
         // Build the final meshes and atlas
-        let (opaque_mesh, transparent_mesh, atlas, greedy_materials) = mesh_builder.build()?;
+        let (opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials) = mesh_builder.build()?;
+
+        // Collect animated texture metadata for viewer-side frame cycling
+        let animated_textures = Self::collect_animated_textures(&self.resource_pack, &atlas);
 
         Ok(MesherOutput {
             opaque_mesh,
+            cutout_mesh,
             transparent_mesh,
             atlas,
             bounds,
             greedy_materials,
+            animated_textures,
         })
+    }
+
+    /// Collect animation metadata for textures that are animated and present in the atlas.
+    fn collect_animated_textures(
+        resource_pack: &ResourcePack,
+        atlas: &TextureAtlas,
+    ) -> Vec<AnimatedTextureExport> {
+        let mut result = Vec::new();
+
+        for (texture_path, region) in &atlas.regions {
+            let texture = match resource_pack.get_texture(texture_path) {
+                Some(t) if t.is_animated && t.frame_count > 1 => t,
+                _ => continue,
+            };
+
+            // Encode the full sprite sheet as PNG
+            let sprite_sheet_png = match texture.to_png() {
+                Ok(png) => png,
+                Err(_) => continue,
+            };
+
+            let anim = texture.animation.as_ref();
+            let frame_width = anim.and_then(|a| a.frame_width).unwrap_or(texture.width);
+            let frame_height = anim.and_then(|a| a.frame_height).unwrap_or(frame_width);
+            let frametime = anim.map(|a| a.frametime).unwrap_or(1);
+            let interpolate = anim.map(|a| a.interpolate).unwrap_or(false);
+            let frames = anim.and_then(|a| a.frames.as_ref()).map(|fs| {
+                fs.iter().map(|f| f.index).collect()
+            });
+
+            // Convert atlas region from UV (0-1) to pixel coordinates
+            let atlas_x = (region.u_min * atlas.width as f32).round() as u32;
+            let atlas_y = (region.v_min * atlas.height as f32).round() as u32;
+
+            result.push(AnimatedTextureExport {
+                sprite_sheet_png,
+                frame_count: texture.frame_count,
+                frametime,
+                interpolate,
+                frames,
+                frame_width,
+                frame_height,
+                atlas_x,
+                atlas_y,
+            });
+        }
+
+        result
     }
 }

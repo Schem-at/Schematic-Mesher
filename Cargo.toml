@@ -39,7 +39,7 @@ zip = { version = "2.0", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 # glTF export
-gltf-json = "1.4"
+gltf-json = { version = "1.4", features = ["extras"] }
 
 # Math utilities
 glam = "0.27"

@@ -112,6 +112,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tint_provider: TintProvider::new(),
             ambient_occlusion: true,
             ao_intensity: 0.4,
+            enable_block_light: false,
+            enable_sky_light: false,
+            sky_light_level: 15,
         };
         let mesher_off = Mesher::with_config(pack1, config_off);
         let output_off = mesher_off.mesh(&source)?;
@@ -140,6 +143,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tint_provider: TintProvider::new(),
             ambient_occlusion: true,
             ao_intensity: 0.4,
+            enable_block_light: false,
+            enable_sky_light: false,
+            sky_light_level: 15,
         };
         let mesher_on = Mesher::with_config(pack2, config_on);
         let output_on = mesher_on.mesh(&source)?;
@@ -191,6 +197,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tint_provider: TintProvider::new(),
             ambient_occlusion: true,
             ao_intensity: 0.4,
+            enable_block_light: false,
+            enable_sky_light: false,
+            sky_light_level: 15,
         };
         let mesher_off = Mesher::with_config(pack1, config_off);
         let output_off = mesher_off.mesh(&source)?;
@@ -218,6 +227,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tint_provider: TintProvider::new(),
             ambient_occlusion: true,
             ao_intensity: 0.4,
+            enable_block_light: false,
+            enable_sky_light: false,
+            sky_light_level: 15,
         };
         let mesher_on = Mesher::with_config(pack2, config_on);
         let output_on = mesher_on.mesh(&source)?;

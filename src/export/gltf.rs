@@ -53,13 +53,14 @@ fn align_buffer(buffer: &mut Vec<u8>, alignment: usize) {
 /// Greedy-merged materials get their own textures with REPEAT wrapping for proper tiling.
 pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
     let opaque_mesh = &output.opaque_mesh;
+    let cutout_mesh = &output.cutout_mesh;
     let transparent_mesh = &output.transparent_mesh;
     let atlas = &output.atlas;
     // Check if all meshes are empty
     let has_greedy = output.greedy_materials.iter().any(|gm| {
         !gm.opaque_mesh.is_empty() || !gm.transparent_mesh.is_empty()
     });
-    if opaque_mesh.is_empty() && transparent_mesh.is_empty() && !has_greedy {
+    if opaque_mesh.is_empty() && cutout_mesh.is_empty() && transparent_mesh.is_empty() && !has_greedy {
         return Err(MesherError::Export("Cannot export empty mesh".to_string()));
     }
 
@@ -192,6 +193,7 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
     }
 
     let opaque_offsets = write_mesh(&mut buffer_data, opaque_mesh, &center, &half_ext);
+    let cutout_offsets = write_mesh(&mut buffer_data, cutout_mesh, &center, &half_ext);
     let transparent_offsets = write_mesh(&mut buffer_data, transparent_mesh, &center, &half_ext);
 
     // Write greedy material mesh data
@@ -218,6 +220,15 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         let offset = buffer_data.len();
         buffer_data.extend_from_slice(&gm.texture_png);
         greedy_texture_offsets.push((offset, gm.texture_png.len()));
+    }
+
+    // Append animated texture sprite sheet PNGs (aligned to 4 bytes)
+    let mut anim_texture_offsets: Vec<(usize, usize)> = Vec::new();
+    for at in &output.animated_textures {
+        align_buffer(&mut buffer_data, 4);
+        let offset = buffer_data.len();
+        buffer_data.extend_from_slice(&at.sprite_sheet_png);
+        anim_texture_offsets.push((offset, at.sprite_sheet_png.len()));
     }
 
     let total_buffer_size = buffer_data.len();
@@ -332,7 +343,9 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
 
     // Material 0: Atlas opaque
     materials.push(create_material_with_texture(json::material::AlphaMode::Opaque, 0));
-    // Material 1: Atlas transparent
+    // Material 1: Atlas cutout (alpha-tested, writes depth — fire, flowers, leaves)
+    materials.push(create_material_with_alpha_cutoff(0, 0.5));
+    // Material 2: Atlas transparent (alpha-blended — water, ice, stained glass)
     materials.push(create_material_with_texture(json::material::AlphaMode::Blend, 0));
 
     // Atlas texture image and glTF texture
@@ -366,8 +379,11 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
     if let Some(ref offsets) = opaque_offsets {
         add_mesh_primitive(offsets, 0, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
     }
-    if let Some(ref offsets) = transparent_offsets {
+    if let Some(ref offsets) = cutout_offsets {
         add_mesh_primitive(offsets, 1, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
+    }
+    if let Some(ref offsets) = transparent_offsets {
+        add_mesh_primitive(offsets, 2, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
     }
 
     // Add greedy material images, textures, materials, and primitives
@@ -425,6 +441,64 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         }
     }
 
+    // Add animated texture sprite sheet images and build scene extras
+    let mut anim_texture_indices: Vec<u32> = Vec::new();
+    for (i, _at) in output.animated_textures.iter().enumerate() {
+        let (offset, len) = anim_texture_offsets[i];
+        if len == 0 {
+            continue;
+        }
+
+        buffer_views.push(json::buffer::View {
+            buffer: json::Index::new(0),
+            byte_length: USize64(len as u64),
+            byte_offset: Some(USize64(offset as u64)),
+            byte_stride: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+            target: None,
+        });
+        let img_view = buffer_view_idx;
+        buffer_view_idx += 1;
+
+        let image_idx = images.len() as u32;
+        images.push(json::Image {
+            buffer_view: Some(json::Index::new(img_view)),
+            mime_type: Some(json::image::MimeType("image/png".to_string())),
+            uri: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        anim_texture_indices.push(image_idx);
+    }
+
+    // Build scene extras with animation metadata
+    let scene_extras: json::Extras = if !output.animated_textures.is_empty() {
+        let anim_entries: Vec<serde_json::Value> = output.animated_textures.iter().enumerate().map(|(i, at)| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("imageIndex".into(), serde_json::Value::from(anim_texture_indices[i] as u64));
+            entry.insert("frameCount".into(), serde_json::Value::from(at.frame_count as u64));
+            entry.insert("frametime".into(), serde_json::Value::from(at.frametime as u64));
+            entry.insert("interpolate".into(), serde_json::Value::from(at.interpolate));
+            entry.insert("frameWidth".into(), serde_json::Value::from(at.frame_width as u64));
+            entry.insert("frameHeight".into(), serde_json::Value::from(at.frame_height as u64));
+            entry.insert("atlasX".into(), serde_json::Value::from(at.atlas_x as u64));
+            entry.insert("atlasY".into(), serde_json::Value::from(at.atlas_y as u64));
+            if let Some(ref frames) = at.frames {
+                let frame_values: Vec<serde_json::Value> = frames.iter().map(|&f| serde_json::Value::from(f as u64)).collect();
+                entry.insert("frames".into(), serde_json::Value::from(frame_values));
+            }
+            serde_json::Value::from(entry)
+        }).collect();
+        let mut extras_obj = serde_json::Map::new();
+        extras_obj.insert("animatedTextures".into(), serde_json::Value::from(anim_entries));
+        let json_str = serde_json::to_string(&extras_obj).unwrap_or_default();
+        serde_json::value::RawValue::from_string(json_str).ok()
+    } else {
+        None
+    };
+
     // Build glTF JSON with KHR_mesh_quantization extension
     let root = json::Root {
         accessors,
@@ -471,7 +545,7 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         }],
         scenes: vec![json::Scene {
             extensions: Default::default(),
-            extras: Default::default(),
+            extras: scene_extras,
             nodes: vec![json::Index::new(0)],
         }],
         scene: Some(json::Index::new(0)),
@@ -526,6 +600,7 @@ fn calculate_bounds_all(output: &MesherOutput) -> ([f32; 3], [f32; 3]) {
     let mut max = [f32::MIN; 3];
 
     let all_vertices = output.opaque_mesh.vertices.iter()
+        .chain(output.cutout_mesh.vertices.iter())
         .chain(output.transparent_mesh.vertices.iter())
         .chain(output.greedy_materials.iter().flat_map(|gm| {
             gm.opaque_mesh.vertices.iter().chain(gm.transparent_mesh.vertices.iter())
@@ -624,6 +699,35 @@ fn create_primitive(
     }
 }
 
+/// Create a material with MASK alpha mode and a specific cutoff for binary-alpha textures.
+fn create_material_with_alpha_cutoff(texture_idx: u32, cutoff: f32) -> json::Material {
+    json::Material {
+        pbr_metallic_roughness: json::material::PbrMetallicRoughness {
+            base_color_texture: Some(json::texture::Info {
+                index: json::Index::new(texture_idx),
+                tex_coord: 0,
+                extensions: Default::default(),
+                extras: Default::default(),
+            }),
+            base_color_factor: json::material::PbrBaseColorFactor([1.0, 1.0, 1.0, 1.0]),
+            metallic_factor: json::material::StrengthFactor(0.0),
+            roughness_factor: json::material::StrengthFactor(1.0),
+            metallic_roughness_texture: None,
+            extensions: Default::default(),
+            extras: Default::default(),
+        },
+        alpha_mode: Valid(json::material::AlphaMode::Mask),
+        alpha_cutoff: Some(json::material::AlphaCutoff(cutoff)),
+        double_sided: true,
+        normal_texture: None,
+        occlusion_texture: None,
+        emissive_texture: None,
+        emissive_factor: json::material::EmissiveFactor([0.0, 0.0, 0.0]),
+        extensions: Default::default(),
+        extras: Default::default(),
+    }
+}
+
 /// Create a material with the specified alpha mode and texture index.
 fn create_material_with_texture(alpha_mode: json::material::AlphaMode, texture_idx: u32) -> json::Material {
     // Opaque materials use backface culling; transparent/blended materials are double-sided
@@ -682,10 +786,12 @@ mod tests {
 
         let output = MesherOutput {
             opaque_mesh: mesh,
+            cutout_mesh: Mesh::new(),
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
             greedy_materials: Vec::new(),
+            animated_textures: Vec::new(),
         };
 
         let glb = export_glb(&output).unwrap();
@@ -699,10 +805,12 @@ mod tests {
     fn test_export_empty_mesh_fails() {
         let output = MesherOutput {
             opaque_mesh: Mesh::new(),
+            cutout_mesh: Mesh::new(),
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
             greedy_materials: Vec::new(),
+            animated_textures: Vec::new(),
         };
 
         let result = export_glb(&output);
@@ -720,10 +828,12 @@ mod tests {
 
         let output = MesherOutput {
             opaque_mesh: Mesh::new(),
+            cutout_mesh: Mesh::new(),
             transparent_mesh: mesh,
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
             greedy_materials: Vec::new(),
+            animated_textures: Vec::new(),
         };
 
         let glb = export_glb(&output).unwrap();
@@ -773,10 +883,12 @@ mod tests {
 
         let output = MesherOutput {
             opaque_mesh: mesh,
+            cutout_mesh: Mesh::new(),
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
             greedy_materials: Vec::new(),
+            animated_textures: Vec::new(),
         };
 
         let glb = export_glb(&output).unwrap();
@@ -801,10 +913,12 @@ mod tests {
 
         let output = MesherOutput {
             opaque_mesh: mesh,
+            cutout_mesh: Mesh::new(),
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [100.0, 0.0, 1.0]),
             greedy_materials: Vec::new(),
+            animated_textures: Vec::new(),
         };
 
         let glb = export_glb(&output).unwrap();

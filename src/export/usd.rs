@@ -33,7 +33,7 @@ pub fn export_usda(output: &MesherOutput) -> Result<UsdaExport> {
         .greedy_materials
         .iter()
         .any(|gm| !gm.opaque_mesh.is_empty() || !gm.transparent_mesh.is_empty());
-    if output.opaque_mesh.is_empty() && output.transparent_mesh.is_empty() && !has_greedy {
+    if output.opaque_mesh.is_empty() && output.cutout_mesh.is_empty() && output.transparent_mesh.is_empty() && !has_greedy {
         return Err(MesherError::Export("Cannot export empty mesh".to_string()));
     }
 
@@ -41,7 +41,7 @@ pub fn export_usda(output: &MesherOutput) -> Result<UsdaExport> {
 
     // Pre-size the output buffer: ~200 bytes per vertex (multiple arrays) + ~10 per index
     let vert_count = output.total_vertices();
-    let idx_count = output.opaque_mesh.indices.len() + output.transparent_mesh.indices.len()
+    let idx_count = output.opaque_mesh.indices.len() + output.cutout_mesh.indices.len() + output.transparent_mesh.indices.len()
         + output.greedy_materials.iter().map(|gm| gm.opaque_mesh.indices.len() + gm.transparent_mesh.indices.len()).sum::<usize>();
     let estimated_size = 2048 + vert_count * 200 + idx_count * 10;
     let mut usda = String::with_capacity(estimated_size);
@@ -94,6 +94,9 @@ pub fn export_usda(output: &MesherOutput) -> Result<UsdaExport> {
     // Atlas-based meshes
     if !output.opaque_mesh.is_empty() {
         write_mesh_prim(&mut usda, "opaque", &output.opaque_mesh, "atlas_opaque");
+    }
+    if !output.cutout_mesh.is_empty() {
+        write_mesh_prim(&mut usda, "cutout", &output.cutout_mesh, "atlas_opaque");
     }
     if !output.transparent_mesh.is_empty() {
         write_mesh_prim(
@@ -383,10 +386,12 @@ mod tests {
         mesh.add_triangle(v0, v1, v2);
         MesherOutput {
             opaque_mesh: mesh,
+            cutout_mesh: Mesh::new(),
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
             greedy_materials: Vec::new(),
+            animated_textures: Vec::new(),
         }
     }
 
@@ -423,10 +428,12 @@ mod tests {
     fn test_export_usda_empty_fails() {
         let output = MesherOutput {
             opaque_mesh: Mesh::new(),
+            cutout_mesh: Mesh::new(),
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
             greedy_materials: Vec::new(),
+            animated_textures: Vec::new(),
         };
         assert!(export_usda(&output).is_err());
     }
@@ -440,10 +447,12 @@ mod tests {
         mesh.add_triangle(v0, v1, v2);
         let output = MesherOutput {
             opaque_mesh: Mesh::new(),
+            cutout_mesh: Mesh::new(),
             transparent_mesh: mesh,
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
             greedy_materials: Vec::new(),
+            animated_textures: Vec::new(),
         };
         let export = export_usda(&output).unwrap();
         assert!(export.usda.contains("def Mesh \"transparent\""));
@@ -469,10 +478,12 @@ mod tests {
         mesh.add_triangle(v0, v1, v2);
         let output = MesherOutput {
             opaque_mesh: mesh,
+            cutout_mesh: Mesh::new(),
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
             greedy_materials: Vec::new(),
+            animated_textures: Vec::new(),
         };
         let export = export_usda(&output).unwrap();
         assert!(export.usda.contains("primvars:displayColor"));

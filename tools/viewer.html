@@ -2,12 +2,22 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>GLB Debug Viewer</title>
+<title>GLB Viewer</title>
 <style>
   body { margin: 0; overflow: hidden; background: #1a1a2e; }
   canvas { display: block; }
-  #status {
+  #toolbar {
     position: fixed; top: 10px; left: 10px;
+    display: flex; gap: 8px; align-items: center;
+    font: 12px monospace;
+  }
+  #scene-select {
+    background: rgba(0,0,0,0.7); color: #ccc; border: 1px solid #555;
+    padding: 4px 8px; border-radius: 4px; font: 12px monospace;
+    cursor: pointer;
+  }
+  #scene-select:hover { border-color: #888; }
+  #status {
     color: #888; font: 12px monospace;
     background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 4px;
   }
@@ -15,7 +25,10 @@
 </style>
 </head>
 <body>
-<div id="status">waiting...</div>
+<div id="toolbar">
+  <select id="scene-select"></select>
+  <div id="status">waiting...</div>
+</div>
 <script type="importmap">
 {
   "imports": {
@@ -29,8 +42,16 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
-const GLB_FILE = 'debug.glb';
+// Known scenes (will also auto-discover from server)
+const KNOWN_SCENES = [
+  'debug.glb', 'all_blocks.glb', 'test_blocks.glb',
+  'liquid.glb', 'lighting.glb', 'animated.glb', 'entity.glb',
+  '04_output.glb',
+  'cube_baseline.glb', 'cube_optimized.glb',
+  'mixed_baseline.glb', 'mixed_optimized.glb',
+];
 const POLL_MS = 500;
+const MC_TICK_MS = 50; // 1 Minecraft tick = 50ms
 
 // Setup
 const scene = new THREE.Scene();
@@ -62,28 +83,246 @@ scene.add(grid);
 // State
 let currentModel = null;
 let lastModified = null;
+let glbFile = 'debug.glb';
+let resetCamera = true;
+let animationState = null;
 const loader = new GLTFLoader();
 const status = document.getElementById('status');
+const select = document.getElementById('scene-select');
 
+// ── Scene selector ──────────────────────────────────────────────
+async function populateScenes() {
+  const available = [];
+  for (const name of KNOWN_SCENES) {
+    try {
+      const res = await fetch(name, { method: 'HEAD' });
+      if (res.ok) available.push(name);
+    } catch(e) { /* skip */ }
+  }
+  const params = new URLSearchParams(location.search);
+  const fromUrl = params.get('scene') || location.hash.slice(1);
+  if (fromUrl && !available.includes(fromUrl)) {
+    try {
+      const res = await fetch(fromUrl, { method: 'HEAD' });
+      if (res.ok) available.push(fromUrl);
+    } catch(e) { /* skip */ }
+  }
+
+  select.innerHTML = '';
+  for (const name of available) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    opt.textContent = name.replace('.glb', '');
+    select.appendChild(opt);
+  }
+
+  if (fromUrl && available.includes(fromUrl)) {
+    select.value = fromUrl;
+    glbFile = fromUrl;
+  } else if (available.length > 0) {
+    glbFile = available[0];
+    select.value = glbFile;
+  }
+}
+
+select.addEventListener('change', () => {
+  glbFile = select.value;
+  lastModified = null;
+  resetCamera = true;
+  animationState = null;
+  loadGLB();
+  history.replaceState(null, '', '?scene=' + glbFile);
+});
+
+// ── Camera framing ──────────────────────────────────────────────
+function frameCameraOnModel(model) {
+  const box = new THREE.Box3().setFromObject(model);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  controls.target.copy(center);
+  const maxDim = Math.max(size.x, size.y, size.z);
+  camera.position.copy(center).add(new THREE.Vector3(maxDim, maxDim, maxDim));
+  controls.update();
+}
+
+// ── Animated texture support ────────────────────────────────────
+async function setupAnimations(gltf) {
+  // Three.js copies scene extras to scene.userData, also available on raw JSON
+  const sceneExtras = gltf.scene.userData?.animatedTextures
+    ? gltf.scene.userData
+    : gltf.parser?.json?.scenes?.[0]?.extras;
+
+  console.log('[anim] scene.userData:', gltf.scene.userData);
+  console.log('[anim] parser.json extras:', gltf.parser?.json?.scenes?.[0]?.extras);
+  console.log('[anim] resolved extras:', sceneExtras);
+
+  if (!sceneExtras?.animatedTextures?.length) {
+    console.log('[anim] no animated textures found');
+    animationState = null;
+    return;
+  }
+
+  const entries = sceneExtras.animatedTextures;
+  console.log(`[anim] found ${entries.length} animated textures`);
+
+  // Find the atlas texture (first material's texture map)
+  let atlasTexture = null;
+  gltf.scene.traverse(child => {
+    if (child.isMesh && child.material && !atlasTexture) {
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      for (const mat of mats) {
+        if (mat.map) {
+          atlasTexture = mat.map;
+          break;
+        }
+      }
+    }
+  });
+
+  console.log('[anim] atlas texture:', atlasTexture);
+  console.log('[anim] atlas image:', atlasTexture?.image);
+
+  if (!atlasTexture?.image) {
+    console.log('[anim] no atlas texture found, aborting');
+    animationState = null;
+    return;
+  }
+
+  // Load sprite sheet images from GLB binary buffer and prepare per-entry frame textures.
+  // Animation works by writing frames directly into the original atlas texture on the GPU
+  // using renderer.copyTextureToTexture() — no texture replacement needed.
+  const animEntries = [];
+  for (const entry of entries) {
+    try {
+      const imageDef = gltf.parser.json.images[entry.imageIndex];
+      const bufferView = await gltf.parser.getDependency('bufferView', imageDef.bufferView);
+      const blob = new Blob([bufferView], { type: imageDef.mimeType });
+      const url = URL.createObjectURL(blob);
+      const img = await new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = reject;
+        image.src = url;
+      });
+      URL.revokeObjectURL(url);
+
+      // Create a small canvas + reusable DataTexture for this entry's frame size
+      const fw = entry.frameWidth, fh = entry.frameHeight;
+      const fc = document.createElement('canvas');
+      fc.width = fw; fc.height = fh;
+      const fctx = fc.getContext('2d', { willReadFrequently: true });
+      const frameTex = new THREE.DataTexture(
+        new Uint8Array(fw * fh * 4), fw, fh, THREE.RGBAFormat, THREE.UnsignedByteType
+      );
+      frameTex.flipY = atlasTexture.flipY;
+      frameTex.colorSpace = atlasTexture.colorSpace;
+      frameTex.generateMipmaps = false;
+
+      console.log(`[anim] loaded sprite sheet ${entry.imageIndex}: ${img.width}x${img.height}`);
+      animEntries.push({
+        ...entry,
+        spriteSheet: img,
+        frameCanvas: fc,
+        frameCtx: fctx,
+        frameTex,
+        currentFrame: 0,
+        tickCounter: 0,
+        orderIndex: 0,
+      });
+    } catch (e) {
+      console.warn('[anim] Failed to load sprite sheet', entry.imageIndex, e);
+    }
+  }
+
+  if (animEntries.length === 0) {
+    animationState = null;
+    return;
+  }
+
+  // No texture replacement — we write directly into the atlas via copyTextureToTexture
+  animationState = {
+    atlasTexture,
+    entries: animEntries,
+    lastTime: performance.now(),
+    tickAccum: 0,
+  };
+
+  console.log(`Animated textures: ${animEntries.length} entries`);
+}
+
+function updateAnimations(now) {
+  if (!animationState || animationsPaused) return;
+
+  const { atlasTexture, entries } = animationState;
+  const dt = now - animationState.lastTime;
+  animationState.lastTime = now;
+
+  // Accumulate time in MC ticks
+  animationState.tickAccum += dt;
+  if (animationState.tickAccum < MC_TICK_MS) return;
+
+  const ticksElapsed = Math.floor(animationState.tickAccum / MC_TICK_MS);
+  animationState.tickAccum %= MC_TICK_MS;
+
+  for (const entry of entries) {
+    const frameTicks = entry.frametime || 1;
+    entry.tickCounter += ticksElapsed;
+
+    if (entry.tickCounter >= frameTicks) {
+      const framesAdvanced = Math.floor(entry.tickCounter / frameTicks);
+      entry.tickCounter %= frameTicks;
+
+      const oldFrame = entry.currentFrame;
+      let newFrame;
+
+      if (entry.frames) {
+        entry.orderIndex = (entry.orderIndex + framesAdvanced) % entry.frames.length;
+        newFrame = entry.frames[entry.orderIndex];
+      } else {
+        newFrame = (oldFrame + framesAdvanced) % entry.frameCount;
+      }
+
+      if (newFrame !== oldFrame) {
+        entry.currentFrame = newFrame;
+
+        const fw = entry.frameWidth;
+        const fh = entry.frameHeight;
+        const srcY = newFrame * fh;
+
+        // Draw frame onto small canvas, extract pixels into reusable DataTexture
+        entry.frameCtx.clearRect(0, 0, fw, fh);
+        entry.frameCtx.drawImage(entry.spriteSheet, 0, srcY, fw, fh, 0, 0, fw, fh);
+        const pixels = entry.frameCtx.getImageData(0, 0, fw, fh).data;
+        entry.frameTex.image.data.set(new Uint8Array(pixels.buffer));
+        entry.frameTex.needsUpdate = true;
+
+        // Copy frame directly into the original atlas texture on the GPU
+        const dstPos = new THREE.Vector2(entry.atlasX, entry.atlasY);
+        renderer.copyTextureToTexture(entry.frameTex, atlasTexture, null, dstPos);
+      }
+    }
+  }
+}
+
+// ── GLB loading ─────────────────────────────────────────────────
 function loadGLB() {
-  const url = GLB_FILE + '?t=' + Date.now();
-  loader.load(url, (gltf) => {
+  const url = glbFile + '?t=' + Date.now();
+  loader.load(url, async (gltf) => {
     if (currentModel) scene.remove(currentModel);
     currentModel = gltf.scene;
     scene.add(currentModel);
 
-    // Auto-center camera on first load
-    if (!lastModified) {
-      const box = new THREE.Box3().setFromObject(currentModel);
-      const center = box.getCenter(new THREE.Vector3());
-      const size = box.getSize(new THREE.Vector3());
-      controls.target.copy(center);
-      const maxDim = Math.max(size.x, size.y, size.z);
-      camera.position.copy(center).add(new THREE.Vector3(maxDim, maxDim, maxDim));
-      controls.update();
+    if (resetCamera) {
+      frameCameraOnModel(currentModel);
+      resetCamera = false;
     }
 
-    status.textContent = 'loaded ' + new Date().toLocaleTimeString();
+    // Set up animated textures if present
+    await setupAnimations(gltf);
+
+    const animCount = animationState?.entries.length || 0;
+    const animLabel = animCount > 0 ? ` (${animCount} animated)` : '';
+    status.textContent = 'loaded ' + new Date().toLocaleTimeString() + animLabel;
     status.className = 'reload';
     setTimeout(() => status.className = '', 1000);
   }, undefined, (err) => {
@@ -91,10 +330,10 @@ function loadGLB() {
   });
 }
 
-// Poll for file changes via HEAD request
+// ── File change polling ─────────────────────────────────────────
 async function poll() {
   try {
-    const res = await fetch(GLB_FILE, { method: 'HEAD' });
+    const res = await fetch(glbFile, { method: 'HEAD' });
     const mod = res.headers.get('Last-Modified') || res.headers.get('Content-Length');
     if (mod !== lastModified) {
       lastModified = mod;
@@ -106,22 +345,34 @@ async function poll() {
   setTimeout(poll, POLL_MS);
 }
 
-// Resize
+// ── Animation toggle (press A) ───────────────────────────────────
+let animationsPaused = false;
+addEventListener('keydown', (e) => {
+  if (e.key === 'a' || e.key === 'A') {
+    animationsPaused = !animationsPaused;
+    status.textContent = animationsPaused ? 'animations PAUSED' : 'animations resumed';
+    status.className = 'reload';
+    setTimeout(() => status.className = '', 1000);
+  }
+});
+
+// ── Resize ──────────────────────────────────────────────────────
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
 
-// Render loop
-function animate() {
+// ── Render loop with animation updates ──────────────────────────
+function animate(now) {
   requestAnimationFrame(animate);
+  updateAnimations(now || performance.now());
   controls.update();
   renderer.render(scene, camera);
 }
 
 animate();
-poll();
+populateScenes().then(() => poll());
 </script>
 </body>
 </html>

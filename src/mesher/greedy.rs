@@ -17,6 +17,8 @@ pub struct FaceMergeKey {
     /// Per-vertex ambient occlusion values (0=darkest, 3=brightest).
     /// Faces with different AO patterns won't merge, preserving AO detail.
     pub ao: [u8; 4],
+    /// Quantized light level (0-15). Faces with different light levels won't merge.
+    pub light: u8,
 }
 
 /// A face recorded for greedy merging.
@@ -431,6 +433,7 @@ mod tests {
             texture: "block/stone".to_string(),
             tint: [255, 255, 255, 255],
             ao: [3, 3, 3, 3],
+            light: 15,
         }
     }
 
@@ -439,6 +442,7 @@ mod tests {
             texture: "block/dirt".to_string(),
             tint: [255, 255, 255, 255],
             ao: [3, 3, 3, 3],
+            light: 15,
         }
     }
 

@@ -13,6 +13,7 @@ use std::fmt::Write;
 pub fn export_obj(output: &MesherOutput, name: &str) -> Result<(String, String)> {
     // Combine atlas-based meshes
     let mut atlas_mesh = output.opaque_mesh.clone();
+    atlas_mesh.merge(&output.cutout_mesh);
     atlas_mesh.merge(&output.transparent_mesh);
 
     let total_verts = output.total_vertices();
@@ -216,10 +217,12 @@ mod tests {
 
         let output = MesherOutput {
             opaque_mesh: mesh,
+            cutout_mesh: Mesh::new(),
             transparent_mesh: Mesh::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
             greedy_materials: Vec::new(),
+            animated_textures: Vec::new(),
         };
 
         let (obj, mtl) = export_obj(&output, "test").unwrap();

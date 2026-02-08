@@ -96,6 +96,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tint_provider: TintProvider::new(),
         ambient_occlusion: false, // Disable for individual tests
         ao_intensity: 0.5,
+        enable_block_light: false,
+        enable_sky_light: false,
+        sky_light_level: 15,
     };
 
     let mesher = Mesher::with_config(pack, config);
@@ -221,6 +224,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tint_provider: TintProvider::new(),
         ambient_occlusion: true,
         ao_intensity: 0.5,
+        enable_block_light: false,
+        enable_sky_light: false,
+        sky_light_level: 15,
     };
     let mesher2 = Mesher::with_config(pack2, config2);
 

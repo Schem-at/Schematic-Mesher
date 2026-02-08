@@ -198,12 +198,17 @@ fn try_pack(
         let x = current_x + padding;
         let y = current_y + padding;
 
-        // Copy texture pixels to atlas
-        for ty in 0..texture.height {
-            for tx in 0..texture.width {
-                let src_idx = ((ty * texture.width + tx) * 4) as usize;
-                let dst_x = x + tx;
-                let dst_y = y + ty;
+        // Copy texture pixels to atlas with edge-clamped padding.
+        // Padding pixels get the nearest edge pixel color to prevent
+        // bilinear filtering from bleeding black at texel boundaries.
+        for py in 0..tex_height {
+            for px in 0..tex_width {
+                let sx = (px as i32 - padding as i32).clamp(0, texture.width as i32 - 1) as u32;
+                let sy = (py as i32 - padding as i32).clamp(0, texture.height as i32 - 1) as u32;
+
+                let src_idx = ((sy * texture.width + sx) * 4) as usize;
+                let dst_x = current_x + px;
+                let dst_y = current_y + py;
                 let dst_idx = ((dst_y * atlas_size + dst_x) * 4) as usize;
 
                 if src_idx + 4 <= texture.pixels.len() && dst_idx + 4 <= pixels.len() {

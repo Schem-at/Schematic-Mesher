@@ -66,6 +66,9 @@ fn config() -> MesherConfig {
         tint_provider: TintProvider::new(),
         ambient_occlusion: true,
         ao_intensity: 0.4,
+        enable_block_light: false,
+        enable_sky_light: false,
+        sky_light_level: 15,
     }
 }
 

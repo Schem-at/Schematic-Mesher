@@ -10,7 +10,7 @@ pub mod texture;
 
 pub use blockstate::{BlockstateDefinition, ModelVariant, MultipartCase, MultipartCondition};
 pub use model::{BlockModel, ModelElement, ModelFace};
-pub use texture::TextureData;
+pub use texture::{TextureData, AnimationMeta, AnimFrame};
 
 use std::collections::HashMap;
 

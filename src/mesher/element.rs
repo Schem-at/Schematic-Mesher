@@ -5,9 +5,11 @@ use crate::error::{MesherError, Result};
 use crate::mesher::face_culler::FaceCuller;
 use crate::mesher::geometry::{Mesh, Vertex};
 use crate::mesher::greedy::{FaceMergeKey, GreedyMesher, quantize_color};
+use crate::mesher::entity;
+use crate::mesher::liquid::{self, FluidState};
 use crate::mesher::MesherConfig;
 use crate::resolver::{resolve_block, ModelResolver, ResolvedModel};
-use crate::resource_pack::{BlockModel, ModelElement, ModelFace, ResourcePack};
+use crate::resource_pack::{ModelElement, ModelFace, ResourcePack};
 use crate::types::{BlockPosition, BlockTransform, Direction, InputBlock};
 use glam::{Mat3, Vec3};
 use std::collections::{HashMap, HashSet};
@@ -91,6 +93,10 @@ pub struct MeshBuilder<'a> {
     greedy: Option<GreedyMesher>,
     /// Cache of resolved models keyed by block identity (name + properties).
     resolve_cache: HashMap<String, Vec<ResolvedModel>>,
+    /// Block map for neighbor lookups (used by liquid geometry).
+    block_map: Option<&'a HashMap<BlockPosition, &'a InputBlock>>,
+    /// Light map for brightness calculations.
+    light_map: Option<&'a crate::mesher::lighting::LightMap>,
 }
 
 impl<'a> MeshBuilder<'a> {
@@ -98,6 +104,8 @@ impl<'a> MeshBuilder<'a> {
         resource_pack: &'a ResourcePack,
         config: &'a MesherConfig,
         culler: Option<&'a FaceCuller<'a>>,
+        block_map: Option<&'a HashMap<BlockPosition, &'a InputBlock>>,
+        light_map: Option<&'a crate::mesher::lighting::LightMap>,
     ) -> Self {
         let greedy = if config.greedy_meshing {
             Some(GreedyMesher::new())
@@ -115,6 +123,8 @@ impl<'a> MeshBuilder<'a> {
             culler,
             greedy,
             resolve_cache: HashMap::new(),
+            block_map,
+            light_map,
         }
     }
 
@@ -124,6 +134,16 @@ impl<'a> MeshBuilder<'a> {
         pos: BlockPosition,
         block: &InputBlock,
     ) -> Result<()> {
+        // Check if this is a mob entity — generate custom geometry, bypass model resolution
+        if let Some(mob_type) = entity::detect_mob(block) {
+            return self.add_mob(pos, block, mob_type);
+        }
+
+        // Check if this is a liquid block — generate custom geometry
+        if let Some(fluid_state) = FluidState::from_block(block) {
+            return self.add_liquid(pos, block, &fluid_state);
+        }
+
         let cache_key = block_cache_key(block);
 
         // Check resolution cache first
@@ -131,26 +151,210 @@ impl<'a> MeshBuilder<'a> {
             for resolved in &cached {
                 self.add_model(pos, block, resolved)?;
             }
+        } else {
+            // Resolve the block to models
+            let resolved_models = match resolve_block(self.resource_pack, block) {
+                Ok(models) => models,
+                Err(e) => {
+                    // Log warning but continue (don't return — entity check below)
+                    eprintln!("Warning: Failed to resolve block {}: {}", block.name, e);
+                    Vec::new()
+                }
+            };
+
+            // Generate geometry for each model
+            for resolved in &resolved_models {
+                self.add_model(pos, block, resolved)?;
+            }
+
+            // Store in cache for future blocks with same identity
+            self.resolve_cache.insert(cache_key, resolved_models);
+        }
+
+        // Check for block entity — generates additive geometry
+        if let Some(entity_type) = entity::detect_block_entity(block) {
+            self.add_entity(pos, block, &entity_type)?;
+        }
+
+        Ok(())
+    }
+
+    /// Add liquid geometry for a water/lava block.
+    fn add_liquid(
+        &mut self,
+        pos: BlockPosition,
+        block: &InputBlock,
+        state: &FluidState,
+    ) -> Result<()> {
+        // Get the block map for neighbor lookups
+        let empty_map = HashMap::new();
+        let block_map = self.block_map.unwrap_or(&empty_map);
+
+        // Determine base color: water uses tint, lava uses white
+        let base_color = match state.fluid_type {
+            liquid::FluidType::Water => {
+                let mut c = self.config.tint_provider.get_tint(block, 0);
+                c[3] = 0.8; // Water is semi-transparent
+                c
+            }
+            liquid::FluidType::Lava => [1.0, 1.0, 1.0, 1.0],
+        };
+
+        // Opacity check function using the culler
+        let is_opaque = |p: BlockPosition| -> bool {
+            self.culler.map(|c| c.is_fully_opaque_at(p)).unwrap_or(false)
+        };
+
+        let (vertices, indices, face_textures) =
+            liquid::generate_fluid_geometry(pos, state, block_map, is_opaque, base_color);
+
+        // Register texture refs
+        self.texture_refs.insert(state.still_texture().to_string());
+        self.texture_refs.insert(state.flow_texture().to_string());
+
+        // Add vertices and track face texture mappings.
+        // Each FaceTexture corresponds to one quad (4 vertices, 6 indices).
+        let base_vertex = self.mesh.vertex_count() as u32;
+
+        for v in &vertices {
+            self.mesh.add_vertex(*v);
+        }
+
+        // Each face in face_textures corresponds to sequential groups of 4 verts / 6 indices
+        let base_index = self.mesh.indices.len();
+
+        for &idx in &indices {
+            self.mesh.indices.push(base_vertex + idx);
+        }
+
+        let mut idx_offset = base_index;
+        for ft in &face_textures {
+            // Find the minimum vertex index in this face's 6 indices to determine vertex_start
+            let face_v_start = (idx_offset - base_index) as u32 / 6 * 4 + base_vertex;
+            self.face_textures.push(FaceTextureMapping {
+                vertex_start: face_v_start,
+                index_start: idx_offset,
+                texture_path: ft.texture.to_string(),
+                is_transparent: ft.is_transparent,
+            });
+            idx_offset += 6;
+        }
+
+        Ok(())
+    }
+
+    /// Add entity geometry for a block entity (chest, bed, bell, sign, skull).
+    fn add_entity(
+        &mut self,
+        pos: BlockPosition,
+        block: &InputBlock,
+        entity_type: &entity::BlockEntityType,
+    ) -> Result<()> {
+        let (vertices, indices, face_textures) =
+            entity::generate_entity_geometry(block, entity_type);
+
+        if vertices.is_empty() {
             return Ok(());
         }
 
-        // Resolve the block to models
-        let resolved_models = match resolve_block(self.resource_pack, block) {
-            Ok(models) => models,
-            Err(e) => {
-                // Log warning but continue
-                eprintln!("Warning: Failed to resolve block {}: {}", block.name, e);
-                return Ok(());
-            }
-        };
-
-        // Generate geometry for each model
-        for resolved in &resolved_models {
-            self.add_model(pos, block, resolved)?;
+        // Register entity texture
+        if let Some(ft) = face_textures.first() {
+            self.texture_refs.insert(ft.texture.clone());
         }
 
-        // Store in cache for future blocks with same identity
-        self.resolve_cache.insert(cache_key, resolved_models);
+        // Add vertices with block position offset and optional lighting
+        let base_vertex = self.mesh.vertex_count() as u32;
+        let base_index = self.mesh.indices.len();
+
+        let is_emissive = self.light_map.map(|lm| lm.is_emissive(pos)).unwrap_or(false);
+
+        for v in &vertices {
+            let mut vertex = *v;
+            // Offset to world position (entity geometry is in [0,1] block-local space,
+            // but regular blocks use [-0.5, 0.5] centered convention, so subtract 0.5)
+            vertex.position[0] += pos.x as f32 - 0.5;
+            vertex.position[1] += pos.y as f32 - 0.5;
+            vertex.position[2] += pos.z as f32 - 0.5;
+
+            // Apply lighting if enabled
+            if !is_emissive {
+                if let Some(lm) = self.light_map {
+                    // Use average brightness for entity (no per-face direction available yet)
+                    let brightness = lm.face_brightness(pos, Direction::Up);
+                    vertex.color[0] *= brightness;
+                    vertex.color[1] *= brightness;
+                    vertex.color[2] *= brightness;
+                }
+            }
+
+            self.mesh.add_vertex(vertex);
+        }
+
+        for &idx in &indices {
+            self.mesh.indices.push(base_vertex + idx);
+        }
+
+        // Track face texture mappings for atlas UV remapping
+        let mut idx_offset = base_index;
+        for ft in &face_textures {
+            let face_v_start = (idx_offset - base_index) as u32 / 6 * 4 + base_vertex;
+            self.face_textures.push(FaceTextureMapping {
+                vertex_start: face_v_start,
+                index_start: idx_offset,
+                texture_path: ft.texture.clone(),
+                is_transparent: ft.is_transparent,
+            });
+            idx_offset += 6;
+        }
+
+        Ok(())
+    }
+
+    /// Add mob entity geometry (zombie, skeleton, creeper, pig).
+    fn add_mob(
+        &mut self,
+        pos: BlockPosition,
+        block: &InputBlock,
+        mob_type: entity::MobType,
+    ) -> Result<()> {
+        let (vertices, indices, face_textures) =
+            entity::generate_mob_geometry(block, mob_type);
+
+        if vertices.is_empty() {
+            return Ok(());
+        }
+
+        // Register entity texture
+        if let Some(ft) = face_textures.first() {
+            self.texture_refs.insert(ft.texture.clone());
+        }
+
+        let base_vertex = self.mesh.vertex_count() as u32;
+        let base_index = self.mesh.indices.len();
+
+        for v in &vertices {
+            let mut vertex = *v;
+            vertex.position[0] += pos.x as f32 - 0.5;
+            vertex.position[1] += pos.y as f32 - 0.5;
+            vertex.position[2] += pos.z as f32 - 0.5;
+            self.mesh.add_vertex(vertex);
+        }
+
+        for &idx in &indices {
+            self.mesh.indices.push(base_vertex + idx);
+        }
+
+        let mut idx_offset = base_index;
+        for ft in &face_textures {
+            let face_v_start = (idx_offset - base_index) as u32 / 6 * 4 + base_vertex;
+            self.face_textures.push(FaceTextureMapping {
+                vertex_start: face_v_start,
+                index_start: idx_offset,
+                texture_path: ft.texture.clone(),
+                is_transparent: ft.is_transparent,
+            });
+            idx_offset += 6;
+        }
 
         Ok(())
     }
@@ -235,6 +439,9 @@ impl<'a> MeshBuilder<'a> {
         transform: &BlockTransform,
         resolved_textures: &std::collections::HashMap<String, String>,
     ) -> Result<()> {
+        // Compute lighting factor for this block position
+        let is_emissive = self.light_map.map(|lm| lm.is_emissive(pos)).unwrap_or(false);
+
         // Process each face
         for (direction, face) in &element.faces {
             // Transform the face direction by block rotation (for AO and cullface)
@@ -261,11 +468,31 @@ impl<'a> MeshBuilder<'a> {
                 .map(|t| t.has_transparency())
                 .unwrap_or(false);
 
+            // Compute light factor for this face
+            let light_factor = if is_emissive {
+                1.0 // Emissive blocks are always fully bright
+            } else if let Some(lm) = self.light_map {
+                lm.face_brightness(pos, world_direction)
+            } else {
+                1.0 // No lighting → full brightness
+            };
+
+            // Quantized light level for greedy merge key (0-15)
+            let light_key = if self.light_map.is_some() {
+                (light_factor * 15.0).round() as u8
+            } else {
+                15
+            };
+
             // Route to greedy mesher if eligible
             if self.greedy.is_some() && self.is_greedy_eligible(element, face, transform) {
-                let base_color = self.config.tint_provider.get_tint(block, face.tintindex);
+                let mut base_color = self.config.tint_provider.get_tint(block, face.tintindex);
+                // Apply lighting to tint color before quantization
+                base_color[0] *= light_factor;
+                base_color[1] *= light_factor;
+                base_color[2] *= light_factor;
                 // Compute per-vertex AO for this face so it's included in the merge key
-                let ao = if self.config.ambient_occlusion {
+                let ao = if self.config.ambient_occlusion && !is_emissive {
                     self.culler
                         .map(|c| c.calculate_ao(pos, world_direction))
                         .unwrap_or([3, 3, 3, 3])
@@ -276,6 +503,7 @@ impl<'a> MeshBuilder<'a> {
                     texture: texture_path,
                     tint: quantize_color(base_color),
                     ao,
+                    light: light_key,
                 };
                 self.greedy.as_mut().unwrap().add_face(
                     pos,
@@ -297,14 +525,15 @@ impl<'a> MeshBuilder<'a> {
             });
 
             // Calculate AO if enabled (use world direction for neighbor checks)
-            let ao_values = if self.config.ambient_occlusion {
+            // Skip AO for emissive blocks
+            let ao_values = if self.config.ambient_occlusion && !is_emissive {
                 self.culler.map(|c| c.calculate_ao(pos, world_direction))
             } else {
                 None
             };
 
-            // Generate face geometry
-            self.add_face(pos, block, element, *direction, face, transform, ao_values)?;
+            // Generate face geometry (with lighting applied)
+            self.add_face(pos, block, element, *direction, face, transform, ao_values, light_factor)?;
         }
 
         Ok(())
@@ -337,6 +566,7 @@ impl<'a> MeshBuilder<'a> {
         face: &ModelFace,
         transform: &BlockTransform,
         ao_values: Option<[u8; 4]>,
+        light_factor: f32,
     ) -> Result<()> {
         let normal = direction.normal();
         let uv = face.normalized_uv();
@@ -365,17 +595,23 @@ impl<'a> MeshBuilder<'a> {
         // Get tint color from the tint provider based on block type and tint index
         let base_color = self.config.tint_provider.get_tint(block, face.tintindex);
 
-        // Calculate per-vertex colors with AO
+        // Calculate per-vertex colors with AO and lighting
         let colors = if let Some(ao) = ao_values {
             let intensity = self.config.ao_intensity;
             [
-                self.apply_ao_to_color(base_color, ao[0], intensity),
-                self.apply_ao_to_color(base_color, ao[1], intensity),
-                self.apply_ao_to_color(base_color, ao[2], intensity),
-                self.apply_ao_to_color(base_color, ao[3], intensity),
+                apply_ao_and_light(base_color, ao[0], intensity, light_factor),
+                apply_ao_and_light(base_color, ao[1], intensity, light_factor),
+                apply_ao_and_light(base_color, ao[2], intensity, light_factor),
+                apply_ao_and_light(base_color, ao[3], intensity, light_factor),
             ]
         } else {
-            [base_color; 4]
+            let lit = [
+                base_color[0] * light_factor,
+                base_color[1] * light_factor,
+                base_color[2] * light_factor,
+                base_color[3],
+            ];
+            [lit; 4]
         };
 
         let v0 = self.mesh.add_vertex(
@@ -435,22 +671,6 @@ impl<'a> MeshBuilder<'a> {
         }
 
         Ok(())
-    }
-
-    /// Apply ambient occlusion to a color.
-    /// ao_level: 0-3 (0=darkest, 3=brightest)
-    /// intensity: 0.0-1.0 (how much to darken)
-    fn apply_ao_to_color(&self, color: [f32; 4], ao_level: u8, intensity: f32) -> [f32; 4] {
-        // Map AO level 0-3 to brightness factor
-        // Level 3 = full brightness (1.0)
-        // Level 0 = minimum brightness (1.0 - intensity)
-        let brightness = 1.0 - intensity * (1.0 - ao_level as f32 / 3.0);
-        [
-            color[0] * brightness,
-            color[1] * brightness,
-            color[2] * brightness,
-            color[3], // Alpha unchanged
-        ]
     }
 
     /// Generate the 4 vertices for a face.
@@ -679,11 +899,11 @@ impl<'a> MeshBuilder<'a> {
         }
     }
 
-    /// Build the final meshes (opaque and transparent) and atlas.
-    /// Returns (opaque_mesh, transparent_mesh, atlas, greedy_materials).
-    /// Opaque geometry should be rendered first, then transparent.
+    /// Build the final meshes (opaque, cutout, and transparent) and atlas.
+    /// Returns (opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials).
+    /// Render order: opaque first, then cutout (alpha-tested), then transparent (alpha-blended).
     /// Greedy materials have their own textures with REPEAT wrapping for tiling.
-    pub fn build(mut self) -> Result<(Mesh, Mesh, TextureAtlas, Vec<GreedyMaterial>)> {
+    pub fn build(mut self) -> Result<(Mesh, Mesh, Mesh, TextureAtlas, Vec<GreedyMaterial>)> {
         // Emit greedy-merged quads into the mesh before atlas building
         self.emit_greedy_quads();
 
@@ -716,13 +936,13 @@ impl<'a> MeshBuilder<'a> {
             }
         }
 
-        // Separate atlas-based faces into opaque and transparent meshes
-        let (opaque_mesh, transparent_mesh) = self.separate_by_transparency();
+        // Separate atlas-based faces into opaque, cutout, and transparent meshes
+        let (opaque_mesh, cutout_mesh, transparent_mesh) = self.separate_by_transparency();
 
         // Build greedy materials: group greedy faces by texture path
         let greedy_materials = self.build_greedy_materials();
 
-        Ok((opaque_mesh, transparent_mesh, atlas, greedy_materials))
+        Ok((opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials))
     }
 
     /// Build per-texture GreedyMaterial meshes from greedy faces.
@@ -805,9 +1025,13 @@ impl<'a> MeshBuilder<'a> {
             .collect()
     }
 
-    /// Separate the mesh into opaque and transparent parts based on texture transparency.
-    fn separate_by_transparency(&self) -> (Mesh, Mesh) {
+    /// Separate the mesh into opaque, cutout, and transparent parts.
+    /// - Opaque: no transparency at all
+    /// - Cutout: binary alpha (texture has transparency but vertex alpha ≈ 1.0) — uses MASK mode
+    /// - Transparent: semi-transparent (vertex alpha < 1.0, e.g. water) — uses BLEND mode
+    fn separate_by_transparency(&self) -> (Mesh, Mesh, Mesh) {
         let mut opaque_mesh = Mesh::new();
+        let mut cutout_mesh = Mesh::new();
         let mut transparent_mesh = Mesh::new();
 
         // Process each face using tracked index positions (O(n) instead of O(n²))
@@ -820,10 +1044,20 @@ impl<'a> MeshBuilder<'a> {
                 continue;
             }
 
-            let target_mesh = if face_mapping.is_transparent {
-                &mut transparent_mesh
-            } else {
+            let target_mesh = if !face_mapping.is_transparent {
                 &mut opaque_mesh
+            } else {
+                // Check vertex alpha to distinguish cutout from blend:
+                // If any vertex has alpha < 0.99, it's semi-transparent (BLEND).
+                // Otherwise it's binary alpha (CUTOUT/MASK).
+                let has_blend_alpha = (0..4).any(|i| {
+                    self.mesh.vertices[vstart + i].color[3] < 0.99
+                });
+                if has_blend_alpha {
+                    &mut transparent_mesh
+                } else {
+                    &mut cutout_mesh
+                }
             };
 
             let orig_v0 = face_mapping.vertex_start;
@@ -845,8 +1079,23 @@ impl<'a> MeshBuilder<'a> {
             }
         }
 
-        (opaque_mesh, transparent_mesh)
+        (opaque_mesh, cutout_mesh, transparent_mesh)
     }
+}
+
+/// Apply AO and lighting to a color.
+/// ao_level: 0-3 (0=darkest, 3=brightest)
+/// intensity: AO intensity (0.0-1.0)
+/// light_factor: lighting brightness multiplier (0.0-1.0)
+fn apply_ao_and_light(color: [f32; 4], ao_level: u8, intensity: f32, light_factor: f32) -> [f32; 4] {
+    let ao_brightness = 1.0 - intensity * (1.0 - ao_level as f32 / 3.0);
+    let combined = ao_brightness * light_factor;
+    [
+        color[0] * combined,
+        color[1] * combined,
+        color[2] * combined,
+        color[3],
+    ]
 }
 
 /// Bake ambient occlusion into a tile texture's pixels.
@@ -922,7 +1171,7 @@ mod tests {
     fn test_rotate_uvs() {
         let pack = ResourcePack::new();
         let config = MesherConfig::default();
-        let builder = MeshBuilder::new(&pack, &config, None);
+        let builder = MeshBuilder::new(&pack, &config, None, None, None);
 
         let uvs = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
 
@@ -964,7 +1213,7 @@ mod tests {
     fn test_greedy_eligible_full_cube() {
         let pack = ResourcePack::new();
         let config = MesherConfig::default();
-        let builder = MeshBuilder::new(&pack, &config, None);
+        let builder = MeshBuilder::new(&pack, &config, None, None, None);
 
         let element = full_cube_element();
         let face = full_face();
@@ -977,7 +1226,7 @@ mod tests {
     fn test_greedy_ineligible_partial_element() {
         let pack = ResourcePack::new();
         let config = MesherConfig::default();
-        let builder = MeshBuilder::new(&pack, &config, None);
+        let builder = MeshBuilder::new(&pack, &config, None, None, None);
 
         // Slab-like element (half height)
         let element = ModelElement {
@@ -997,7 +1246,7 @@ mod tests {
     fn test_greedy_ineligible_rotated_block() {
         let pack = ResourcePack::new();
         let config = MesherConfig::default();
-        let builder = MeshBuilder::new(&pack, &config, None);
+        let builder = MeshBuilder::new(&pack, &config, None, None, None);
 
         let element = full_cube_element();
         let face = full_face();
@@ -1010,7 +1259,7 @@ mod tests {
     fn test_greedy_ineligible_custom_uv() {
         let pack = ResourcePack::new();
         let config = MesherConfig::default();
-        let builder = MeshBuilder::new(&pack, &config, None);
+        let builder = MeshBuilder::new(&pack, &config, None, None, None);
 
         let element = full_cube_element();
         let face = ModelFace {
@@ -1029,7 +1278,7 @@ mod tests {
     fn test_greedy_ineligible_rotated_uv() {
         let pack = ResourcePack::new();
         let config = MesherConfig::default();
-        let builder = MeshBuilder::new(&pack, &config, None);
+        let builder = MeshBuilder::new(&pack, &config, None, None, None);
 
         let element = full_cube_element();
         let face = ModelFace {
@@ -1048,7 +1297,7 @@ mod tests {
     fn test_greedy_ineligible_element_rotation() {
         let pack = ResourcePack::new();
         let config = MesherConfig::default();
-        let builder = MeshBuilder::new(&pack, &config, None);
+        let builder = MeshBuilder::new(&pack, &config, None, None, None);
 
         let element = ModelElement {
             from: [0.0, 0.0, 0.0],

@@ -201,6 +201,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tint_provider: TintProvider::new(),
         ambient_occlusion: true,
         ao_intensity: 0.6, // Increased for visibility
+        enable_block_light: false,
+        enable_sky_light: false,
+        sky_light_level: 15,
     };
 
     let mesher = Mesher::with_config(pack, config);
@@ -273,10 +276,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             schematic_mesher::mesher::MesherOutput {
                 opaque_mesh: mesh,
+                cutout_mesh: schematic_mesher::mesher::geometry::Mesh::new(),
                 transparent_mesh: schematic_mesher::mesher::geometry::Mesh::new(),
                 atlas: schematic_mesher::atlas::TextureAtlas::empty(),
                 bounds: BoundingBox::new([-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]),
                 greedy_materials: Vec::new(),
+                animated_textures: Vec::new(),
             }
         }
     };
