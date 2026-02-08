@@ -393,6 +393,10 @@ fn build_item_transform(
     ));
     let display_mat = dt_translate * dt_rot_y * dt_rot_x * dt_rot_z * dt_scale;
 
+    // Step 2b: Minecraft's ItemFrameRenderer applies an additional scale(0.5) after
+    // display.fixed transforms (see RenderItemFrame.renderItem in MC source)
+    let renderer_scale = Mat4::from_scale(Vec3::splat(0.5));
+
     // Step 3: item rotation (0-7 steps of 45 degrees around Z)
     let item_rot_angle = (item_rotation % 8) as f32 * std::f32::consts::FRAC_PI_4;
     let item_rot = Mat4::from_rotation_z(-item_rot_angle);
@@ -414,8 +418,8 @@ fn build_item_transform(
     let facing_mat =
         Mat4::from_translation(block_center) * rot_mat * Mat4::from_translation(-block_center);
 
-    // Combined: facing * to_frame * item_rot * display * center
-    facing_mat * to_frame * item_rot * display_mat * center
+    // Combined: facing * to_frame * item_rot * renderer_scale * display * center
+    facing_mat * to_frame * item_rot * renderer_scale * display_mat * center
 }
 
 /// Apply a transform matrix to all vertices (positions and normals).
@@ -960,9 +964,9 @@ mod tests {
         let mat = build_item_transform(&display, 0, "south");
 
         // With default display and south facing, the item should be near the frame surface
-        // Test that a center point (0.5, 0.5, 0.5) ends up near the frame surface
+        // center (0.5,0.5,0.5) → centered at origin → scaled 0.5 → at frame z
         let p = mat * Vec4::new(0.5, 0.5, 0.5, 1.0);
-        // Should be at approximately (0.5, 0.5, 15/16)
+        // After 0.5 scale, origin stays at origin, then translated to (0.5, 0.5, 15/16)
         assert!((p.x - 0.5).abs() < 0.01);
         assert!((p.y - 0.5).abs() < 0.01);
         assert!((p.z - 15.0 / 16.0).abs() < 0.01);

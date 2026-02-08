@@ -469,6 +469,6 @@ fn build_armor_model(slot: ArmorSlot, texture: &str) -> EntityModelDef {
         texture_path: texture.to_string(),
         texture_size: [64, 32],
         parts: vec![root],
-        is_opaque: true,
+        is_opaque: false, // Armor textures have transparent regions
     }
 }
