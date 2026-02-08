@@ -1,11 +1,23 @@
 //! Block entity model geometry generation.
 //!
 //! Hardcodes entity model geometry for block entities like chests, beds, bells,
-//! signs, and skulls. These blocks have minimal/empty JSON block models — their
-//! actual visual geometry is defined in Java code.
+//! signs, skulls, and shulker boxes. These blocks have minimal/empty JSON block
+//! models — their actual visual geometry is defined in Java code.
 //!
 //! Follows the liquid module's integration pattern: detect entity type, generate
 //! vertices/indices/face textures, then integrate in MeshBuilder::add_block().
+
+pub mod armor_stand;
+mod bed;
+mod bell;
+mod chest;
+mod item_frame;
+pub mod item_render;
+mod minecart;
+mod mob;
+mod shulker;
+mod sign;
+mod skull;
 
 use crate::mesher::geometry::Vertex;
 use crate::types::{Direction, InputBlock};
@@ -26,6 +38,8 @@ pub struct EntityCube {
     pub inflate: f32,
     /// Mirror UVs horizontally.
     pub mirror: bool,
+    /// Faces to skip (used to prevent z-fighting at block boundaries).
+    pub skip_faces: Vec<Direction>,
 }
 
 /// Pose/transform for an entity model part.
@@ -108,6 +122,7 @@ pub enum BlockEntityType {
     Bell,
     Sign { wood: SignWood, is_wall: bool },
     Skull(SkullType),
+    ShulkerBox { color: Option<String> },
 }
 
 /// Mob entity types (rendered as static models).
@@ -117,6 +132,11 @@ pub enum MobType {
     Skeleton,
     Creeper,
     Pig,
+    ArmorStand,
+    Minecart,
+    ItemFrame,
+    GlowItemFrame,
+    DroppedItem,
 }
 
 /// Face texture info for a generated entity face.
@@ -203,6 +223,13 @@ pub fn detect_block_entity(block: &InputBlock) -> Option<BlockEntityType> {
         "player_head" | "player_wall_head" =>
             Some(BlockEntityType::Skull(SkullType::Skeleton)), // fallback texture
 
+        // Shulker Boxes
+        "shulker_box" => Some(BlockEntityType::ShulkerBox { color: None }),
+        id if id.ends_with("_shulker_box") => {
+            let color = id.strip_suffix("_shulker_box").unwrap_or("purple").to_string();
+            Some(BlockEntityType::ShulkerBox { color: Some(color) })
+        }
+
         _ => None,
     }
 }
@@ -215,6 +242,11 @@ pub fn detect_mob(block: &InputBlock) -> Option<MobType> {
         "skeleton" => Some(MobType::Skeleton),
         "creeper" => Some(MobType::Creeper),
         "pig" => Some(MobType::Pig),
+        "armor_stand" => Some(MobType::ArmorStand),
+        "minecart" => Some(MobType::Minecart),
+        "item_frame" => Some(MobType::ItemFrame),
+        "glow_item_frame" => Some(MobType::GlowItemFrame),
+        "item" => Some(MobType::DroppedItem),
         _ => None,
     }
 }
@@ -331,27 +363,44 @@ pub fn generate_entity_geometry(
     let model = build_model_def(entity_type);
 
     let facing = get_facing(block);
-    let facing_angle = match entity_type {
-        BlockEntityType::Sign { is_wall: false, .. } => standing_rotation_rad(block),
-        BlockEntityType::Skull(_) => {
-            let block_id = block.block_id();
-            if block_id.contains("wall") {
-                facing_rotation_rad(facing)
-            } else {
-                standing_rotation_rad(block)
-            }
-        }
-        _ => facing_rotation_rad(facing),
-    };
 
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let mut face_textures = Vec::new();
 
-    // Build facing rotation matrix (rotate around block center 0.5, 0, 0.5)
-    let facing_mat = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
-        * Mat4::from_rotation_y(facing_angle)
-        * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5));
+    // Build facing rotation matrix
+    let facing_mat = if matches!(entity_type, BlockEntityType::ShulkerBox { .. }) {
+        // Shulker boxes use 6-direction facing (up/down/north/south/east/west)
+        // Rotate around full block center (0.5, 0.5, 0.5)
+        let center = Vec3::new(0.5, 0.5, 0.5);
+        let rot_mat = match facing {
+            "up" => Mat4::IDENTITY,
+            "down" => Mat4::from_rotation_x(std::f32::consts::PI),
+            "north" => Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            "south" => Mat4::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+            "east" => Mat4::from_rotation_z(-std::f32::consts::FRAC_PI_2),
+            "west" => Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            _ => Mat4::IDENTITY,
+        };
+        Mat4::from_translation(center) * rot_mat * Mat4::from_translation(-center)
+    } else {
+        // Standard Y-rotation around (0.5, 0, 0.5)
+        let facing_angle = match entity_type {
+            BlockEntityType::Sign { is_wall: false, .. } => standing_rotation_rad(block),
+            BlockEntityType::Skull(_) => {
+                let block_id = block.block_id();
+                if block_id.contains("wall") {
+                    facing_rotation_rad(facing)
+                } else {
+                    standing_rotation_rad(block)
+                }
+            }
+            _ => facing_rotation_rad(facing),
+        };
+        Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+            * Mat4::from_rotation_y(facing_angle)
+            * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5))
+    };
 
     traverse_parts(
         &model.parts,
@@ -373,7 +422,19 @@ pub fn generate_mob_geometry(
     block: &InputBlock,
     mob_type: MobType,
 ) -> (Vec<Vertex>, Vec<u32>, Vec<EntityFaceTexture>) {
-    let model = build_mob_model(mob_type);
+    // Item frames use block textures, not an entity texture sheet
+    if matches!(mob_type, MobType::ItemFrame | MobType::GlowItemFrame) {
+        let is_glow = matches!(mob_type, MobType::GlowItemFrame);
+        let facing = get_facing(block);
+        return item_frame::generate_item_frame_geometry(facing, is_glow);
+    }
+
+    // Dropped items are rendered entirely in add_mob() with resource pack access
+    if matches!(mob_type, MobType::DroppedItem) {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+
+    let model = mob::build_mob_model(mob_type);
 
     let facing = get_facing(block);
     let facing_angle = facing_rotation_rad(facing);
@@ -485,7 +546,6 @@ fn generate_cube_faces(
         Vec3::new(x0, y1, z1), // 7: -++
     ];
 
-    // Transform corners: part hierarchy transform, then divide by... wait, already /16.
     // Apply part transform then facing transform.
     let full_transform = *facing_mat * *transform;
     let transformed: Vec<[f32; 3]> = corners.iter().map(|c| {
@@ -510,6 +570,10 @@ fn generate_cube_faces(
     ];
 
     for &(direction, corner_indices) in &face_defs {
+        if cube.skip_faces.contains(&direction) {
+            continue;
+        }
+
         let uvs = cube_face_uvs(
             cube.tex_offset,
             cube.dimensions,
@@ -558,851 +622,13 @@ fn generate_cube_faces(
 
 fn build_model_def(entity_type: &BlockEntityType) -> EntityModelDef {
     match entity_type {
-        BlockEntityType::Chest(variant) => chest_model(*variant),
-        BlockEntityType::DoubleChest { variant, side } => double_chest_model(*variant, *side),
-        BlockEntityType::Bed { color, is_head } => bed_model(color, *is_head),
-        BlockEntityType::Bell => bell_model(),
-        BlockEntityType::Sign { wood, is_wall } => sign_model(*wood, *is_wall),
-        BlockEntityType::Skull(skull_type) => skull_model(*skull_type),
-    }
-}
-
-/// Single chest model (64x64 texture).
-/// Values from EntityModelJson dump (Minecraft 1.19).
-fn chest_model(variant: ChestVariant) -> EntityModelDef {
-    let texture_path = match variant {
-        ChestVariant::Normal => "entity/chest/normal",
-        ChestVariant::Trapped => "entity/chest/trapped",
-        ChestVariant::Ender => "entity/chest/ender",
-        ChestVariant::Christmas => "entity/chest/christmas",
-    };
-
-    // Bottom: origin [1,0,1], dims [14,10,14], texOffs(0,19)
-    let bottom = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [1.0, 0.0, 1.0],
-            dimensions: [14.0, 10.0, 14.0],
-            tex_offset: [0, 19],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    // Lid: origin [1,0,0], dims [14,5,14], texOffs(0,0), pose position=[0,9,1]
-    let lid = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [1.0, 0.0, 0.0],
-            dimensions: [14.0, 5.0, 14.0],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [0.0, 9.0, 1.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    // Lock: origin [7,-1,15], dims [2,4,1], texOffs(0,0), pose position=[0,8,0]
-    let lock = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [7.0, -1.0, 15.0],
-            dimensions: [2.0, 4.0, 1.0],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [0.0, 8.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    EntityModelDef {
-        texture_path: texture_path.to_string(),
-        texture_size: [64, 64],
-        parts: vec![bottom, lid, lock],
-        is_opaque: true,
-    }
-}
-
-/// Double chest model (uses left/right textures).
-fn double_chest_model(variant: ChestVariant, side: DoubleChestSide) -> EntityModelDef {
-    let base = match variant {
-        ChestVariant::Normal => "entity/chest/normal",
-        ChestVariant::Trapped => "entity/chest/trapped",
-        ChestVariant::Ender => "entity/chest/ender",
-        ChestVariant::Christmas => "entity/chest/christmas",
-    };
-    let suffix = match side {
-        DoubleChestSide::Left => "_left",
-        DoubleChestSide::Right => "_right",
-    };
-    let texture_path = format!("{}{}", base, suffix);
-
-    // Double chest values from EntityModelJson dump.
-    let (bottom_origin, lid_origin, lock_origin, lock_dims) = match side {
-        DoubleChestSide::Left => ([0.0, 0.0, 1.0], [0.0, 0.0, 0.0], [0.0, -1.0, 15.0], [1.0, 4.0, 1.0]),
-        DoubleChestSide::Right => ([1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [15.0, -1.0, 15.0], [1.0, 4.0, 1.0]),
-    };
-
-    let bottom = EntityPart {
-        cubes: vec![EntityCube {
-            origin: bottom_origin,
-            dimensions: [15.0, 10.0, 14.0],
-            tex_offset: [0, 19],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    let lid = EntityPart {
-        cubes: vec![EntityCube {
-            origin: lid_origin,
-            dimensions: [15.0, 5.0, 14.0],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [0.0, 9.0, 1.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let lock = EntityPart {
-        cubes: vec![EntityCube {
-            origin: lock_origin,
-            dimensions: [lock_dims[0], lock_dims[1], lock_dims[2]],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [0.0, 8.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    EntityModelDef {
-        texture_path,
-        texture_size: [64, 64],
-        parts: vec![bottom, lid, lock],
-        is_opaque: true,
-    }
-}
-
-/// Bed model (64x64 texture).
-/// The mattress is modeled upright (16x16x6) and rotated +90° X to lay flat.
-/// Minecraft uses xRot=PI/2: North face UV becomes the visible sleeping surface.
-/// Legs are simple unrotated 3x3x3 cubes at world positions.
-fn bed_model(color: &str, is_head: bool) -> EntityModelDef {
-    let texture_path = format!("entity/bed/{}", color);
-
-    let tex_main: [u32; 2] = if is_head { [0, 0] } else { [0, 22] };
-
-    // Main mattress: origin [0,0,0], dims [16,16,6], rotated +90° X.
-    // RotX(PI/2): cube [0,0,0]-[16,16,6] → [0,-6,0]-[16,0,16].
-    // Position [0, 9, 0] raises it to y=[3,9] in 1/16 units.
-    let main = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [0.0, 0.0, 0.0],
-            dimensions: [16.0, 16.0, 6.0],
-            tex_offset: tex_main,
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [0.0, 9.0, 0.0],
-            rotation: [std::f32::consts::FRAC_PI_2, 0.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    // Legs: 3x3x3 unrotated cubes at fixed positions.
-    let (leg_tex_left, leg_tex_right, leg_z) = if is_head {
-        // Head legs at z=0 side (headboard)
-        ([50u32, 6u32], [50u32, 18u32], 0.0)
-    } else {
-        // Foot legs at z=13 side (footboard)
-        ([50, 0], [50, 12], 13.0)
-    };
-
-    let left_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [0.0, 0.0, leg_z],
-            dimensions: [3.0, 3.0, 3.0],
-            tex_offset: leg_tex_left,
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    let right_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [13.0, 0.0, leg_z],
-            dimensions: [3.0, 3.0, 3.0],
-            tex_offset: leg_tex_right,
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    EntityModelDef {
-        texture_path,
-        texture_size: [64, 64],
-        parts: vec![main, left_leg, right_leg],
-        is_opaque: true,
-    }
-}
-
-/// Bell model (32x32 texture). Only the bell body — frame is from JSON model.
-fn bell_model() -> EntityModelDef {
-    // Bell body: 6x7x6 at texOffs(0,0)
-    let bell_body = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-3.0, -7.0, -3.0],
-            dimensions: [6.0, 7.0, 6.0],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [8.0, 12.0, 8.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    // Bell lip: 8x2x8 at bottom of body
-    let bell_lip = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-4.0, -9.0, -4.0],
-            dimensions: [8.0, 2.0, 8.0],
-            tex_offset: [0, 13],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [8.0, 12.0, 8.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    EntityModelDef {
-        texture_path: "entity/bell/bell_body".to_string(),
-        texture_size: [32, 32],
-        parts: vec![bell_body, bell_lip],
-        is_opaque: true,
-    }
-}
-
-/// Sign model.
-fn sign_model(wood: SignWood, is_wall: bool) -> EntityModelDef {
-    let texture_path = match wood {
-        SignWood::Oak => "entity/signs/oak",
-        SignWood::Spruce => "entity/signs/spruce",
-        SignWood::Birch => "entity/signs/birch",
-        SignWood::Jungle => "entity/signs/jungle",
-        SignWood::Acacia => "entity/signs/acacia",
-        SignWood::DarkOak => "entity/signs/dark_oak",
-        SignWood::Crimson => "entity/signs/crimson",
-        SignWood::Warped => "entity/signs/warped",
-        SignWood::Mangrove => "entity/signs/mangrove",
-        SignWood::Cherry => "entity/signs/cherry",
-        SignWood::Bamboo => "entity/signs/bamboo",
-    };
-
-    // Sign uses Java Y-down coords. Renderer applies RotX(PI) + 2/3 scale.
-    // Standing: position [8, 12, 8] (centered, raised to 0.75 blocks)
-    // Wall: position [8, 7, 1] (centered X, lower Y, pushed against -Z wall face)
-    let (pos_x, pos_y, pos_z) = if is_wall {
-        (8.0, 7.0, 15.0)
-    } else {
-        (8.0, 12.0, 8.0)
-    };
-    let scale = 2.0 / 3.0;
-
-    // Board: origin [-12,-14,-1], dims [24,12,2], texOffs(0,0)
-    let board = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-12.0, -14.0, -1.0],
-            dimensions: [24.0, 12.0, 2.0],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [pos_x, pos_y, pos_z],
-            rotation: [std::f32::consts::PI, 0.0, 0.0],
-            scale: [scale, scale, scale],
-        },
-        children: vec![],
-    };
-
-    let mut parts = vec![board];
-
-    // Standing signs have a stick
-    if !is_wall {
-        // Stick: origin [-1,-2,-1], dims [2,14,2], texOffs(0,14)
-        let stick = EntityPart {
-            cubes: vec![EntityCube {
-                origin: [-1.0, -2.0, -1.0],
-                dimensions: [2.0, 14.0, 2.0],
-                tex_offset: [0, 14],
-                inflate: 0.0,
-                mirror: false,
-            }],
-            pose: EntityPartPose {
-                position: [pos_x, pos_y, pos_z],
-                rotation: [std::f32::consts::PI, 0.0, 0.0],
-                scale: [scale, scale, scale],
-            },
-            children: vec![],
-        };
-        parts.push(stick);
-    }
-
-    EntityModelDef {
-        texture_path: texture_path.to_string(),
-        texture_size: [64, 32],
-        parts,
-        is_opaque: true,
-    }
-}
-
-/// Skull/head model.
-fn skull_model(skull_type: SkullType) -> EntityModelDef {
-    let texture_path = match skull_type {
-        SkullType::Skeleton => "entity/skeleton/skeleton",
-        SkullType::WitherSkeleton => "entity/skeleton/wither_skeleton",
-        SkullType::Zombie => "entity/zombie/zombie",
-        SkullType::Creeper => "entity/creeper/creeper",
-        SkullType::Piglin => "entity/piglin/piglin",
-        SkullType::Dragon => "entity/enderdragon/dragon",
-    };
-
-    let texture_size: [u32; 2] = match skull_type {
-        SkullType::Piglin => [64, 64],
-        SkullType::Dragon => [256, 256],
-        SkullType::Zombie => [64, 64],
-        _ => [64, 32],
-    };
-
-    // Head: 8x8x8 at texOffs(0,0)
-    // Skull uses Y-down entity coords — wrap in root with RotX(PI) to flip Y-up.
-    let head = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-4.0, -8.0, -4.0],
-            dimensions: [8.0, 8.0, 8.0],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    let mut inner_parts = vec![head];
-
-    // Hat overlay only for types that have hat texture region (zombie, piglin).
-    // Skeleton, wither_skeleton, creeper have no hat data — renders as black.
-    // Dragon has different UV layout — no standard hat.
-    let has_hat = matches!(skull_type, SkullType::Zombie | SkullType::Piglin);
-    if has_hat {
-        inner_parts.push(EntityPart {
-            cubes: vec![EntityCube {
-                origin: [-4.0, -8.0, -4.0],
-                dimensions: [8.0, 8.0, 8.0],
-                tex_offset: [32, 0],
-                inflate: 0.25,
-                mirror: false,
-            }],
-            pose: Default::default(),
-            children: vec![],
-        });
-    }
-
-    // Root wrapper: RotX(PI) for Y-down→Y-up, position centers skull on block.
-    let root = EntityPart {
-        cubes: vec![],
-        pose: EntityPartPose {
-            position: [8.0, 0.0, 8.0],
-            rotation: [std::f32::consts::PI, 0.0, 0.0],
-            ..Default::default()
-        },
-        children: inner_parts,
-    };
-
-    EntityModelDef {
-        texture_path: texture_path.to_string(),
-        texture_size,
-        parts: vec![root],
-        is_opaque: has_hat,
-    }
-}
-
-// ── Mob Model Definitions ──────────────────────────────────────────────────
-
-fn build_mob_model(mob_type: MobType) -> EntityModelDef {
-    match mob_type {
-        MobType::Zombie => zombie_model(),
-        MobType::Skeleton => skeleton_model(),
-        MobType::Creeper => creeper_model(),
-        MobType::Pig => pig_model(),
-    }
-}
-
-/// Wrap mob body parts in a root part that converts Java Y-down to Y-up.
-/// RotX(PI) flips Y and Z. Position [8, 24, 8] centers X/Z and translates up
-/// so feet land at ground level (24/16 = 1.5 blocks up).
-fn mob_root(children: Vec<EntityPart>) -> EntityPart {
-    EntityPart {
-        cubes: vec![],
-        pose: EntityPartPose {
-            position: [8.0, 24.0, 8.0],
-            rotation: [std::f32::consts::PI, 0.0, 0.0],
-            ..Default::default()
-        },
-        children,
-    }
-}
-
-/// Zombie model — texture `entity/zombie/zombie`, 64x64.
-fn zombie_model() -> EntityModelDef {
-    let head = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-4.0, -8.0, -4.0],
-            dimensions: [8.0, 8.0, 8.0],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    let hat = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-4.0, -8.0, -4.0],
-            dimensions: [8.0, 8.0, 8.0],
-            tex_offset: [32, 0],
-            inflate: 0.5,
-            mirror: false,
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    let body = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-4.0, 0.0, -2.0],
-            dimensions: [8.0, 12.0, 4.0],
-            tex_offset: [16, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    let right_arm = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-3.0, -2.0, -2.0],
-            dimensions: [4.0, 12.0, 4.0],
-            tex_offset: [40, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [-5.0, 2.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let left_arm = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-1.0, -2.0, -2.0],
-            dimensions: [4.0, 12.0, 4.0],
-            tex_offset: [40, 16],
-            inflate: 0.0,
-            mirror: true,
-        }],
-        pose: EntityPartPose {
-            position: [5.0, 2.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let right_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 12.0, 4.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [-1.9, 12.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let left_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 12.0, 4.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: true,
-        }],
-        pose: EntityPartPose {
-            position: [1.9, 12.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let root = mob_root(vec![head, hat, body, right_arm, left_arm, right_leg, left_leg]);
-
-    EntityModelDef {
-        texture_path: "entity/zombie/zombie".to_string(),
-        texture_size: [64, 64],
-        parts: vec![root],
-        is_opaque: false, // Hat overlay has transparent pixels
-    }
-}
-
-/// Skeleton model — texture `entity/skeleton/skeleton`, 64x32.
-/// Same structure as zombie but 2-wide arms/legs.
-fn skeleton_model() -> EntityModelDef {
-    let head = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-4.0, -8.0, -4.0],
-            dimensions: [8.0, 8.0, 8.0],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    let body = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-4.0, 0.0, -2.0],
-            dimensions: [8.0, 12.0, 4.0],
-            tex_offset: [16, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    let right_arm = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-1.0, -2.0, -1.0],
-            dimensions: [2.0, 12.0, 2.0],
-            tex_offset: [40, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [-5.0, 2.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let left_arm = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-1.0, -2.0, -1.0],
-            dimensions: [2.0, 12.0, 2.0],
-            tex_offset: [40, 16],
-            inflate: 0.0,
-            mirror: true,
-        }],
-        pose: EntityPartPose {
-            position: [5.0, 2.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let right_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-1.0, 0.0, -1.0],
-            dimensions: [2.0, 12.0, 2.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [-2.0, 12.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let left_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-1.0, 0.0, -1.0],
-            dimensions: [2.0, 12.0, 2.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: true,
-        }],
-        pose: EntityPartPose {
-            position: [2.0, 12.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let root = mob_root(vec![head, body, right_arm, left_arm, right_leg, left_leg]);
-
-    EntityModelDef {
-        texture_path: "entity/skeleton/skeleton".to_string(),
-        texture_size: [64, 32],
-        parts: vec![root],
-        is_opaque: false, // Ribcage has transparent pixels
-    }
-}
-
-/// Creeper model — texture `entity/creeper/creeper`, 64x32.
-/// Quadruped with 4 identical short legs.
-fn creeper_model() -> EntityModelDef {
-    let head = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-4.0, -8.0, -4.0],
-            dimensions: [8.0, 8.0, 8.0],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [0.0, 6.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let body = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-4.0, 0.0, -2.0],
-            dimensions: [8.0, 12.0, 4.0],
-            tex_offset: [16, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [0.0, 6.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let right_hind_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 6.0, 4.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [-2.0, 18.0, 4.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let left_hind_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 6.0, 4.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [2.0, 18.0, 4.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let right_front_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 6.0, 4.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [-2.0, 18.0, -4.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let left_front_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 6.0, 4.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [2.0, 18.0, -4.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let root = mob_root(vec![head, body, right_hind_leg, left_hind_leg, right_front_leg, left_front_leg]);
-
-    EntityModelDef {
-        texture_path: "entity/creeper/creeper".to_string(),
-        texture_size: [64, 32],
-        parts: vec![root],
-        is_opaque: true,
-    }
-}
-
-/// Pig model — texture `entity/pig/pig`, 64x32.
-/// Snout is a child of head. Body has RotX(PI/2).
-fn pig_model() -> EntityModelDef {
-    let snout = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 0.0, -9.0],
-            dimensions: [4.0, 3.0, 1.0],
-            tex_offset: [16, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    let head = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-4.0, -4.0, -8.0],
-            dimensions: [8.0, 8.0, 8.0],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [0.0, 12.0, -6.0],
-            ..Default::default()
-        },
-        children: vec![snout],
-    };
-
-    let body = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-5.0, -10.0, -7.0],
-            dimensions: [10.0, 16.0, 8.0],
-            tex_offset: [28, 8],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [0.0, 11.0, 2.0],
-            rotation: [std::f32::consts::FRAC_PI_2, 0.0, 0.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let right_hind_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 6.0, 4.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [-3.0, 18.0, 7.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let left_hind_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 6.0, 4.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [3.0, 18.0, 7.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let right_front_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 6.0, 4.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [-3.0, 18.0, -5.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let left_front_leg = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 6.0, 4.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: false,
-        }],
-        pose: EntityPartPose {
-            position: [3.0, 18.0, -5.0],
-            ..Default::default()
-        },
-        children: vec![],
-    };
-
-    let root = mob_root(vec![head, body, right_hind_leg, left_hind_leg, right_front_leg, left_front_leg]);
-
-    EntityModelDef {
-        texture_path: "entity/pig/temperate_pig".to_string(),
-        texture_size: [64, 64],
-        parts: vec![root],
-        is_opaque: true,
+        BlockEntityType::Chest(variant) => chest::chest_model(*variant),
+        BlockEntityType::DoubleChest { variant, side } => chest::double_chest_model(*variant, *side),
+        BlockEntityType::Bed { color, is_head } => bed::bed_model(color, *is_head),
+        BlockEntityType::Bell => bell::bell_model(),
+        BlockEntityType::Sign { wood, is_wall } => sign::sign_model(*wood, *is_wall),
+        BlockEntityType::Skull(skull_type) => skull::skull_model(*skull_type),
+        BlockEntityType::ShulkerBox { color } => shulker::shulker_model(color.as_deref()),
     }
 }
 
@@ -1486,6 +712,19 @@ mod tests {
         let block = InputBlock::new("minecraft:creeper_head");
         let entity = detect_block_entity(&block);
         assert!(matches!(entity, Some(BlockEntityType::Skull(SkullType::Creeper))));
+    }
+
+    #[test]
+    fn test_detect_shulker_box() {
+        let block = InputBlock::new("minecraft:shulker_box");
+        let entity = detect_block_entity(&block);
+        assert!(matches!(entity, Some(BlockEntityType::ShulkerBox { color: None })));
+
+        let block = InputBlock::new("minecraft:red_shulker_box");
+        match detect_block_entity(&block) {
+            Some(BlockEntityType::ShulkerBox { color: Some(c) }) => assert_eq!(c, "red"),
+            _ => panic!("Expected ShulkerBox with color"),
+        }
     }
 
     #[test]
@@ -1575,6 +814,21 @@ mod tests {
         assert_eq!(faces.len(), 12);
         assert_eq!(verts.len(), 12 * 4);
         assert_eq!(indices.len(), 12 * 6);
+    }
+
+    #[test]
+    fn test_shulker_geometry_count() {
+        let block = InputBlock::new("minecraft:shulker_box")
+            .with_property("facing", "up");
+        let (verts, indices, faces) = generate_entity_geometry(
+            &block,
+            &BlockEntityType::ShulkerBox { color: None },
+        );
+
+        // Shulker: base (1 cube x 5 faces, skip Down) + lid (1 cube x 5 faces, skip Up) = 10 faces
+        assert_eq!(faces.len(), 10);
+        assert_eq!(verts.len(), 10 * 4);
+        assert_eq!(indices.len(), 10 * 6);
     }
 
     #[test]
@@ -1675,5 +929,57 @@ mod tests {
         assert_eq!(faces.len(), 42);
         assert_eq!(verts.len(), 42 * 4);
         assert_eq!(indices.len(), 42 * 6);
+    }
+
+    #[test]
+    fn test_detect_armor_stand() {
+        assert!(matches!(detect_mob(&InputBlock::new("entity:armor_stand")), Some(MobType::ArmorStand)));
+    }
+
+    #[test]
+    fn test_detect_minecart() {
+        assert!(matches!(detect_mob(&InputBlock::new("entity:minecart")), Some(MobType::Minecart)));
+    }
+
+    #[test]
+    fn test_detect_item_frame() {
+        assert!(matches!(detect_mob(&InputBlock::new("entity:item_frame")), Some(MobType::ItemFrame)));
+        assert!(matches!(detect_mob(&InputBlock::new("entity:glow_item_frame")), Some(MobType::GlowItemFrame)));
+    }
+
+    #[test]
+    fn test_armor_stand_geometry_count() {
+        let block = InputBlock::new("entity:armor_stand")
+            .with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::ArmorStand);
+
+        // Armor stand: 10 cubes × 6 faces = 60 faces
+        assert_eq!(faces.len(), 60);
+        assert_eq!(verts.len(), 60 * 4);
+        assert_eq!(indices.len(), 60 * 6);
+    }
+
+    #[test]
+    fn test_minecart_geometry_count() {
+        let block = InputBlock::new("entity:minecart")
+            .with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Minecart);
+
+        // Minecart: 5 cubes × 6 faces = 30 faces
+        assert_eq!(faces.len(), 30);
+        assert_eq!(verts.len(), 30 * 4);
+        assert_eq!(indices.len(), 30 * 6);
+    }
+
+    #[test]
+    fn test_item_frame_geometry_count() {
+        let block = InputBlock::new("entity:item_frame")
+            .with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::ItemFrame);
+
+        // Item frame: 2 + 6 + 6 + 4 + 4 = 22 faces
+        assert_eq!(faces.len(), 22);
+        assert_eq!(verts.len(), 22 * 4);
+        assert_eq!(indices.len(), 22 * 6);
     }
 }

@@ -13,9 +13,9 @@ use std::fs;
 use std::path::Path;
 
 fn build_scene(s: &mut Scene) {
-    // Stone floor 24x24
+    // Stone floor 24x38
     for x in 0..24 {
-        for z in 0..24 {
+        for z in 0..38 {
             s.set(x, 0, z, "minecraft:stone");
         }
     }
@@ -77,6 +77,90 @@ fn build_scene(s: &mut Scene) {
     s.set_with(4, 1, 18, "entity:skeleton", &[("facing", "south")]);
     s.set_with(7, 1, 18, "entity:creeper", &[("facing", "south")]);
     s.set_with(10, 1, 18, "entity:pig", &[("facing", "south")]);
+
+    // === Section 7 (z=20-22): Shulker Boxes ===
+    // Default (purple) + colored variants in different facings
+    s.set_with(1, 1, 20, "minecraft:shulker_box", &[("facing", "up")]);
+    s.set_with(4, 1, 20, "minecraft:red_shulker_box", &[("facing", "up")]);
+    s.set_with(7, 1, 20, "minecraft:blue_shulker_box", &[("facing", "north")]);
+    s.set_with(10, 1, 20, "minecraft:green_shulker_box", &[("facing", "east")]);
+    s.set_with(13, 1, 20, "minecraft:yellow_shulker_box", &[("facing", "down")]);
+    // Wall-mounted shulker
+    s.set(1, 2, 22, "minecraft:stone");
+    s.set_with(1, 2, 21, "minecraft:white_shulker_box", &[("facing", "south")]);
+
+    // === Section 8 (z=24-26): New Entities ===
+    // Armor stands (plain + armored)
+    s.set_with(1, 1, 24, "entity:armor_stand", &[("facing", "south")]);
+    s.set_with(4, 1, 24, "entity:armor_stand", &[
+        ("facing", "south"),
+        ("helmet", "minecraft:diamond_helmet"),
+        ("chestplate", "minecraft:diamond_chestplate"),
+        ("leggings", "minecraft:diamond_leggings"),
+        ("boots", "minecraft:diamond_boots"),
+    ]);
+    s.set_with(7, 1, 24, "entity:armor_stand", &[
+        ("facing", "east"),
+        ("helmet", "minecraft:iron_helmet"),
+        ("chestplate", "minecraft:iron_chestplate"),
+    ]);
+
+    // Minecarts
+    s.set_with(10, 1, 24, "entity:minecart", &[("facing", "south")]);
+    s.set_with(13, 1, 24, "entity:minecart", &[("facing", "east")]);
+
+    // Item frames (on stone wall)
+    s.set(13, 2, 26, "minecraft:stone");
+    s.set_with(13, 2, 25, "entity:item_frame", &[("facing", "south")]);
+    s.set(16, 2, 26, "minecraft:stone");
+    s.set_with(16, 2, 25, "entity:glow_item_frame", &[("facing", "south")]);
+    // Floor-mounted item frame
+    s.set_with(19, 1, 25, "entity:item_frame", &[("facing", "up")]);
+
+    // === Section 9 (z=28-29): Item Frames with Items ===
+    // Wall backing for item frames
+    for x in [1, 4, 7, 10, 13, 16] {
+        s.set(x, 2, 29, "minecraft:stone");
+    }
+
+    // Flat items
+    s.set_with(1, 2, 28, "entity:item_frame", &[
+        ("facing", "south"), ("item", "minecraft:diamond_sword"),
+    ]);
+    s.set_with(4, 2, 28, "entity:item_frame", &[
+        ("facing", "south"), ("item", "minecraft:apple"),
+    ]);
+    s.set_with(7, 2, 28, "entity:item_frame", &[
+        ("facing", "south"), ("item", "minecraft:diamond_pickaxe"), ("item_rotation", "2"),
+    ]);
+
+    // Block items
+    s.set_with(10, 2, 28, "entity:item_frame", &[
+        ("facing", "south"), ("item", "minecraft:oak_planks"),
+    ]);
+    s.set_with(13, 2, 28, "entity:item_frame", &[
+        ("facing", "south"), ("item", "minecraft:diamond_block"),
+    ]);
+
+    // Glow frame with item
+    s.set(16, 2, 29, "minecraft:stone");
+    s.set_with(16, 2, 28, "entity:glow_item_frame", &[
+        ("facing", "south"), ("item", "minecraft:compass"),
+    ]);
+
+    // === Section 10 (z=31-32): Dropped Items ===
+    s.set_with(1, 1, 31, "entity:item", &[
+        ("facing", "south"), ("item", "minecraft:diamond_sword"),
+    ]);
+    s.set_with(4, 1, 31, "entity:item", &[
+        ("facing", "south"), ("item", "minecraft:apple"),
+    ]);
+    s.set_with(7, 1, 31, "entity:item", &[
+        ("facing", "east"), ("item", "minecraft:oak_planks"),
+    ]);
+    s.set_with(10, 1, 31, "entity:item", &[
+        ("facing", "south"), ("item", "minecraft:diamond_block"),
+    ]);
 
     // === Reference blocks nearby ===
     s.set(22, 1, 1, "minecraft:oak_planks");

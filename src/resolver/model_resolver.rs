@@ -89,6 +89,30 @@ impl<'a> ModelResolver<'a> {
         // Use child ambient_occlusion setting
         merged.ambient_occlusion = child.ambient_occlusion;
 
+        // Merge display contexts: child contexts override parent, but parent
+        // contexts not present in child are preserved. This is important because
+        // e.g. item/handheld defines thirdperson views while item/generated
+        // defines the fixed view — both need to survive the merge.
+        match (&merged.display, &child.display) {
+            (Some(parent_display), Some(child_display)) => {
+                if let (Some(parent_obj), Some(child_obj)) =
+                    (parent_display.as_object(), child_display.as_object())
+                {
+                    let mut merged_display = parent_obj.clone();
+                    for (key, value) in child_obj {
+                        merged_display.insert(key.clone(), value.clone());
+                    }
+                    merged.display = Some(serde_json::Value::Object(merged_display));
+                } else {
+                    merged.display = child.display.clone();
+                }
+            }
+            (None, Some(_)) => {
+                merged.display = child.display.clone();
+            }
+            _ => {} // parent kept or both None
+        }
+
         // Clear parent reference (model is now resolved)
         merged.parent = None;
 

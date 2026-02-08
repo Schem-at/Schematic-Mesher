@@ -611,7 +611,7 @@ fn is_likely_full_cube(name: &str) -> bool {
         "sign", "banner", "button", "lever", "torch", "lantern",
         "pressure_plate", "carpet", "rail", "flower", "sapling",
         "glass_pane", "iron_bars", "chain", "rod", "candle",
-        "head", "skull", "pot", "campfire", "anvil", "bell",
+        "head", "skull", "pot", "campfire", "anvil", "bell", "shulker",
         "brewing_stand", "cauldron", "hopper", "lectern",
         "grindstone", "stonecutter", "enchanting_table",
         "repeater", "comparator", "daylight_detector",
@@ -624,7 +624,7 @@ fn is_likely_full_cube(name: &str) -> bool {
         "sugar_cane", "bamboo", "kelp", "seagrass", "lichen",
         "vein", "fire", "snow", "layer",
         // Block entities with non-full geometry
-        "_bed", "chest",
+        "_bed", "chest", "armor_stand", "minecart", "item_frame",
         // Specific flowers that don't have "flower" in name
         "poppy", "dandelion", "orchid", "allium", "tulip",
         "oxeye_daisy", "cornflower", "lily_of_the_valley",

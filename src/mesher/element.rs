@@ -310,7 +310,7 @@ impl<'a> MeshBuilder<'a> {
         Ok(())
     }
 
-    /// Add mob entity geometry (zombie, skeleton, creeper, pig).
+    /// Add mob entity geometry (zombie, skeleton, creeper, pig, item frames, dropped items).
     fn add_mob(
         &mut self,
         pos: BlockPosition,
@@ -320,19 +320,110 @@ impl<'a> MeshBuilder<'a> {
         let (vertices, indices, face_textures) =
             entity::generate_mob_geometry(block, mob_type);
 
-        if vertices.is_empty() {
-            return Ok(());
+        // Add base geometry (may be empty for dropped items)
+        if !vertices.is_empty() {
+            for ft in &face_textures {
+                self.texture_refs.insert(ft.texture.clone());
+            }
+
+            let base_vertex = self.mesh.vertex_count() as u32;
+            let base_index = self.mesh.indices.len();
+
+            for v in &vertices {
+                let mut vertex = *v;
+                vertex.position[0] += pos.x as f32 - 0.5;
+                vertex.position[1] += pos.y as f32 - 0.5;
+                vertex.position[2] += pos.z as f32 - 0.5;
+                self.mesh.add_vertex(vertex);
+            }
+
+            for &idx in &indices {
+                self.mesh.indices.push(base_vertex + idx);
+            }
+
+            let mut idx_offset = base_index;
+            for ft in &face_textures {
+                let face_v_start = (idx_offset - base_index) as u32 / 6 * 4 + base_vertex;
+                self.face_textures.push(FaceTextureMapping {
+                    vertex_start: face_v_start,
+                    index_start: idx_offset,
+                    texture_path: ft.texture.clone(),
+                    is_transparent: ft.is_transparent,
+                });
+                idx_offset += 6;
+            }
         }
 
-        // Register entity texture
-        if let Some(ft) = face_textures.first() {
+        // Item frames: render item inside the frame if "item" property is set
+        if matches!(mob_type, entity::MobType::ItemFrame | entity::MobType::GlowItemFrame) {
+            if let Some(item_id) = block.properties.get("item") {
+                let item_rotation: u8 = block.properties.get("item_rotation")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                let facing = block.properties.get("facing")
+                    .map(|s| s.as_str())
+                    .unwrap_or("south");
+
+                if let Some((item_verts, item_indices, item_faces)) =
+                    entity::item_render::render_item_in_frame(
+                        self.resource_pack, &self.model_resolver,
+                        item_id, item_rotation, facing,
+                    )
+                {
+                    self.add_item_geometry(pos, &item_verts, &item_indices, &item_faces);
+                }
+            }
+        }
+
+        // Dropped items: render via item_render module
+        if matches!(mob_type, entity::MobType::DroppedItem) {
+            if let Some(item_id) = block.properties.get("item") {
+                let facing = block.properties.get("facing")
+                    .map(|s| s.as_str())
+                    .unwrap_or("south");
+
+                if let Some((item_verts, item_indices, item_faces)) =
+                    entity::item_render::render_dropped_item(
+                        self.resource_pack, &self.model_resolver,
+                        item_id, facing,
+                    )
+                {
+                    self.add_item_geometry(pos, &item_verts, &item_indices, &item_faces);
+                }
+            }
+        }
+
+        // Armor stands: render armor overlay if armor properties are set
+        if matches!(mob_type, entity::MobType::ArmorStand) {
+            let facing = block.properties.get("facing")
+                .map(|s| s.as_str())
+                .unwrap_or("south");
+            let (armor_verts, armor_indices, armor_faces) =
+                entity::armor_stand::generate_armor_geometry(block, facing);
+            if !armor_verts.is_empty() {
+                self.add_item_geometry(pos, &armor_verts, &armor_indices, &armor_faces);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add pre-transformed item/overlay geometry at a world position.
+    fn add_item_geometry(
+        &mut self,
+        pos: BlockPosition,
+        item_verts: &[Vertex],
+        item_indices: &[u32],
+        item_faces: &[entity::EntityFaceTexture],
+    ) {
+        for ft in item_faces {
             self.texture_refs.insert(ft.texture.clone());
         }
 
-        let base_vertex = self.mesh.vertex_count() as u32;
-        let base_index = self.mesh.indices.len();
+        let item_base_vertex = self.mesh.vertex_count() as u32;
+        let item_base_index = self.mesh.indices.len();
 
-        for v in &vertices {
+        for v in item_verts {
             let mut vertex = *v;
             vertex.position[0] += pos.x as f32 - 0.5;
             vertex.position[1] += pos.y as f32 - 0.5;
@@ -340,23 +431,22 @@ impl<'a> MeshBuilder<'a> {
             self.mesh.add_vertex(vertex);
         }
 
-        for &idx in &indices {
-            self.mesh.indices.push(base_vertex + idx);
+        for &idx in item_indices {
+            self.mesh.indices.push(item_base_vertex + idx);
         }
 
-        let mut idx_offset = base_index;
-        for ft in &face_textures {
-            let face_v_start = (idx_offset - base_index) as u32 / 6 * 4 + base_vertex;
+        let mut item_idx_offset = item_base_index;
+        for ft in item_faces {
+            let face_v_start = (item_idx_offset - item_base_index) as u32 / 6 * 4
+                + item_base_vertex;
             self.face_textures.push(FaceTextureMapping {
                 vertex_start: face_v_start,
-                index_start: idx_offset,
+                index_start: item_idx_offset,
                 texture_path: ft.texture.clone(),
                 is_transparent: ft.is_transparent,
             });
-            idx_offset += 6;
+            item_idx_offset += 6;
         }
-
-        Ok(())
     }
 
     /// Add a resolved model to the mesh.
