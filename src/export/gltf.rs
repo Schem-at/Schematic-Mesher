@@ -1,4 +1,11 @@
-//! glTF/GLB export.
+//! glTF/GLB export with KHR_mesh_quantization.
+//!
+//! Vertex data is quantized for significant size reduction:
+//! - Positions: f32 → i16 (normalized via node transform)
+//! - Normals: f32 → i8 (normalized, axis-aligned → exact)
+//! - UVs: kept as f32 (greedy UVs can exceed 0-1 range)
+//! - Colors: f32 → u8 (normalized, 256 levels sufficient)
+//! - Indices: u32 → u16 when vertex_count < 65536
 
 use crate::error::{MesherError, Result};
 use crate::mesher::geometry::Mesh;
@@ -8,7 +15,40 @@ use json::validation::Checked::Valid;
 use json::validation::USize64;
 use std::mem;
 
+fn quantize_position(pos: [f32; 3], center: &[f32; 3], half_ext: &[f32; 3]) -> [i16; 3] {
+    let mut q = [0i16; 3];
+    for i in 0..3 {
+        let normalized = (pos[i] - center[i]) / half_ext[i] * 32767.0;
+        q[i] = normalized.round().clamp(-32767.0, 32767.0) as i16;
+    }
+    q
+}
+
+fn quantize_normal(n: [f32; 3]) -> [i8; 3] {
+    [
+        (n[0] * 127.0).round().clamp(-127.0, 127.0) as i8,
+        (n[1] * 127.0).round().clamp(-127.0, 127.0) as i8,
+        (n[2] * 127.0).round().clamp(-127.0, 127.0) as i8,
+    ]
+}
+
+fn quantize_color(c: [f32; 4]) -> [u8; 4] {
+    [
+        (c[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (c[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (c[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (c[3] * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
+/// Pad buffer to the given alignment boundary.
+fn align_buffer(buffer: &mut Vec<u8>, alignment: usize) {
+    let padding = (alignment - (buffer.len() % alignment)) % alignment;
+    buffer.extend(std::iter::repeat(0u8).take(padding));
+}
+
 /// Export a mesh to GLB format (binary glTF) with embedded texture.
+/// Uses KHR_mesh_quantization for ~56% vertex data reduction.
 /// Separates opaque and transparent geometry into different primitives for correct rendering.
 /// Greedy-merged materials get their own textures with REPEAT wrapping for proper tiling.
 pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
@@ -26,29 +66,22 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
     // Get texture PNG data
     let texture_png = atlas.to_png()?;
 
+    // Calculate combined bounding box for position quantization
+    let (bounds_min, bounds_max) = calculate_bounds_all(output);
+
+    // Compute quantization parameters: center and half_extent per axis
+    let mut center = [0.0f32; 3];
+    let mut half_ext = [0.0f32; 3];
+    for i in 0..3 {
+        center[i] = (bounds_max[i] + bounds_min[i]) / 2.0;
+        half_ext[i] = (bounds_max[i] - bounds_min[i]) / 2.0;
+        if half_ext[i] < 1e-6 {
+            half_ext[i] = 1e-6; // avoid div-by-zero
+        }
+    }
+
     // Build the binary buffer incrementally
     let mut buffer_data: Vec<u8> = Vec::new();
-
-    // Helper: append mesh data, return (pos_offset, norm_offset, uv_offset, color_offset, idx_offset)
-    fn append_mesh_data(buffer: &mut Vec<u8>, mesh: &Mesh) -> (usize, usize, usize, usize, usize) {
-        let positions = mesh.positions_flat();
-        let normals = mesh.normals_flat();
-        let uvs = mesh.uvs_flat();
-        let colors = mesh.colors_flat();
-
-        let pos_offset = buffer.len();
-        buffer.extend_from_slice(bytemuck_cast_slice(&positions));
-        let norm_offset = buffer.len();
-        buffer.extend_from_slice(bytemuck_cast_slice(&normals));
-        let uv_offset = buffer.len();
-        buffer.extend_from_slice(bytemuck_cast_slice(&uvs));
-        let color_offset = buffer.len();
-        buffer.extend_from_slice(bytemuck_cast_slice(&colors));
-        let idx_offset = buffer.len();
-        buffer.extend_from_slice(bytemuck_cast_slice(&mesh.indices));
-
-        (pos_offset, norm_offset, uv_offset, color_offset, idx_offset)
-    }
 
     // Track mesh data offsets
     struct MeshOffsets {
@@ -64,15 +97,81 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         idx_bytes: usize,
         vertex_count: usize,
         index_count: usize,
+        pos_min: [i16; 3],
+        pos_max: [i16; 3],
+        use_u16_indices: bool,
     }
 
-    fn write_mesh(buffer: &mut Vec<u8>, mesh: &Mesh) -> Option<MeshOffsets> {
+    fn write_mesh(
+        buffer: &mut Vec<u8>,
+        mesh: &Mesh,
+        center: &[f32; 3],
+        half_ext: &[f32; 3],
+    ) -> Option<MeshOffsets> {
         if mesh.is_empty() {
             return None;
         }
-        let (pos_offset, norm_offset, uv_offset, color_offset, idx_offset) =
-            append_mesh_data(buffer, mesh);
+
+        let vertex_count = mesh.vertex_count();
+        let use_u16_indices = vertex_count <= 65535;
+
+        // Positions: i16 × 3 (2 bytes each = 6 bytes/vertex)
+        // Align to 2 bytes (i16 alignment)
+        align_buffer(buffer, 2);
+        let pos_offset = buffer.len();
+        let mut pos_min = [i16::MAX; 3];
+        let mut pos_max = [i16::MIN; 3];
+        for v in &mesh.vertices {
+            let q = quantize_position(v.position, center, half_ext);
+            for i in 0..3 {
+                pos_min[i] = pos_min[i].min(q[i]);
+                pos_max[i] = pos_max[i].max(q[i]);
+            }
+            buffer.extend_from_slice(bytemuck_cast_slice(&q));
+        }
+
+        // Normals: i8 × 3 (1 byte each = 3 bytes/vertex)
+        // i8 needs no alignment
+        let norm_offset = buffer.len();
+        for v in &mesh.vertices {
+            let q = quantize_normal(v.normal);
+            buffer.extend_from_slice(bytemuck_cast_slice(&q));
+        }
+
+        // UVs: f32 × 2 (4 bytes each = 8 bytes/vertex)
+        // Align to 4 bytes (f32 alignment)
+        align_buffer(buffer, 4);
+        let uv_offset = buffer.len();
+        for v in &mesh.vertices {
+            buffer.extend_from_slice(bytemuck_cast_slice(&v.uv));
+        }
+
+        // Colors: u8 × 4 (1 byte each = 4 bytes/vertex)
+        // u8 needs no alignment
+        let color_offset = buffer.len();
+        for v in &mesh.vertices {
+            let q = quantize_color(v.color);
+            buffer.extend_from_slice(&q);
+        }
+
+        // Indices: u16 or u32
+        if use_u16_indices {
+            // Align to 2 bytes (u16 alignment)
+            align_buffer(buffer, 2);
+        } else {
+            // Align to 4 bytes (u32 alignment)
+            align_buffer(buffer, 4);
+        }
+        let idx_offset = buffer.len();
+        if use_u16_indices {
+            for &idx in &mesh.indices {
+                buffer.extend_from_slice(&(idx as u16).to_le_bytes());
+            }
+        } else {
+            buffer.extend_from_slice(bytemuck_cast_slice(&mesh.indices));
+        }
         let end = buffer.len();
+
         Some(MeshOffsets {
             pos_offset,
             pos_bytes: norm_offset - pos_offset,
@@ -84,25 +183,27 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
             color_bytes: idx_offset - color_offset,
             idx_offset,
             idx_bytes: end - idx_offset,
-            vertex_count: mesh.vertex_count(),
+            vertex_count,
             index_count: mesh.indices.len(),
+            pos_min,
+            pos_max,
+            use_u16_indices,
         })
     }
 
-    let opaque_offsets = write_mesh(&mut buffer_data, opaque_mesh);
-    let transparent_offsets = write_mesh(&mut buffer_data, transparent_mesh);
+    let opaque_offsets = write_mesh(&mut buffer_data, opaque_mesh, &center, &half_ext);
+    let transparent_offsets = write_mesh(&mut buffer_data, transparent_mesh, &center, &half_ext);
 
     // Write greedy material mesh data
     let mut greedy_mesh_offsets: Vec<(Option<MeshOffsets>, Option<MeshOffsets>)> = Vec::new();
     for gm in &output.greedy_materials {
-        let opaque = write_mesh(&mut buffer_data, &gm.opaque_mesh);
-        let transparent = write_mesh(&mut buffer_data, &gm.transparent_mesh);
+        let opaque = write_mesh(&mut buffer_data, &gm.opaque_mesh, &center, &half_ext);
+        let transparent = write_mesh(&mut buffer_data, &gm.transparent_mesh, &center, &half_ext);
         greedy_mesh_offsets.push((opaque, transparent));
     }
 
     // Append atlas texture PNG (aligned to 4 bytes)
-    let texture_padding = (4 - (buffer_data.len() % 4)) % 4;
-    buffer_data.extend(std::iter::repeat(0u8).take(texture_padding));
+    align_buffer(&mut buffer_data, 4);
     let atlas_texture_offset = buffer_data.len();
     buffer_data.extend_from_slice(&texture_png);
 
@@ -113,17 +214,13 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
             greedy_texture_offsets.push((0, 0));
             continue;
         }
-        let padding = (4 - (buffer_data.len() % 4)) % 4;
-        buffer_data.extend(std::iter::repeat(0u8).take(padding));
+        align_buffer(&mut buffer_data, 4);
         let offset = buffer_data.len();
         buffer_data.extend_from_slice(&gm.texture_png);
         greedy_texture_offsets.push((offset, gm.texture_png.len()));
     }
 
     let total_buffer_size = buffer_data.len();
-
-    // Calculate combined bounding box (include greedy meshes)
-    let (min, max) = calculate_bounds_all(output);
 
     // Build glTF arrays
     let mut accessors = Vec::new();
@@ -139,8 +236,6 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
     fn add_mesh_primitive(
         offsets: &MeshOffsets,
         material_idx: u32,
-        bounds_min: [f32; 3],
-        bounds_max: [f32; 3],
         buffer_views: &mut Vec<json::buffer::View>,
         accessors: &mut Vec<json::Accessor>,
         primitives: &mut Vec<json::mesh::Primitive>,
@@ -164,12 +259,73 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         buffer_views.push(create_buffer_view(offsets.idx_offset, offsets.idx_bytes, Some(json::buffer::Target::ElementArrayBuffer)));
         let idx_view = *buffer_view_idx; *buffer_view_idx += 1;
 
-        // 5 accessors
-        accessors.push(create_accessor(pos_view, offsets.vertex_count, json::accessor::Type::Vec3, json::accessor::ComponentType::F32, Some(bounds_min), Some(bounds_max)));
-        accessors.push(create_accessor(norm_view, offsets.vertex_count, json::accessor::Type::Vec3, json::accessor::ComponentType::F32, None, None));
-        accessors.push(create_accessor(uv_view, offsets.vertex_count, json::accessor::Type::Vec2, json::accessor::ComponentType::F32, None, None));
-        accessors.push(create_accessor(color_view, offsets.vertex_count, json::accessor::Type::Vec4, json::accessor::ComponentType::F32, None, None));
-        accessors.push(create_accessor(idx_view, offsets.index_count, json::accessor::Type::Scalar, json::accessor::ComponentType::U32, None, None));
+        // Position accessor: i16, not normalized, with integer min/max
+        accessors.push(create_accessor(
+            pos_view,
+            offsets.vertex_count,
+            json::accessor::Type::Vec3,
+            json::accessor::ComponentType::I16,
+            false,
+            Some(json::Value::from(vec![
+                offsets.pos_min[0] as i64,
+                offsets.pos_min[1] as i64,
+                offsets.pos_min[2] as i64,
+            ])),
+            Some(json::Value::from(vec![
+                offsets.pos_max[0] as i64,
+                offsets.pos_max[1] as i64,
+                offsets.pos_max[2] as i64,
+            ])),
+        ));
+
+        // Normal accessor: i8, normalized
+        accessors.push(create_accessor(
+            norm_view,
+            offsets.vertex_count,
+            json::accessor::Type::Vec3,
+            json::accessor::ComponentType::I8,
+            true,
+            None,
+            None,
+        ));
+
+        // UV accessor: f32, not normalized
+        accessors.push(create_accessor(
+            uv_view,
+            offsets.vertex_count,
+            json::accessor::Type::Vec2,
+            json::accessor::ComponentType::F32,
+            false,
+            None,
+            None,
+        ));
+
+        // Color accessor: u8, normalized
+        accessors.push(create_accessor(
+            color_view,
+            offsets.vertex_count,
+            json::accessor::Type::Vec4,
+            json::accessor::ComponentType::U8,
+            true,
+            None,
+            None,
+        ));
+
+        // Index accessor
+        let idx_component_type = if offsets.use_u16_indices {
+            json::accessor::ComponentType::U16
+        } else {
+            json::accessor::ComponentType::U32
+        };
+        accessors.push(create_accessor(
+            idx_view,
+            offsets.index_count,
+            json::accessor::Type::Scalar,
+            idx_component_type,
+            false,
+            None,
+            None,
+        ));
 
         primitives.push(create_primitive(accessor_start, accessor_start + 4, material_idx));
     }
@@ -208,14 +364,14 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
 
     // Add atlas-based primitives
     if let Some(ref offsets) = opaque_offsets {
-        add_mesh_primitive(offsets, 0, min, max, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
+        add_mesh_primitive(offsets, 0, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
     }
     if let Some(ref offsets) = transparent_offsets {
-        add_mesh_primitive(offsets, 1, min, max, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
+        add_mesh_primitive(offsets, 1, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
     }
 
     // Add greedy material images, textures, materials, and primitives
-    for (i, gm) in output.greedy_materials.iter().enumerate() {
+    for (i, _gm) in output.greedy_materials.iter().enumerate() {
         let (tex_offset, tex_len) = greedy_texture_offsets[i];
         if tex_len == 0 {
             continue;
@@ -262,14 +418,14 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         let (ref opaque_off, ref transparent_off) = greedy_mesh_offsets[i];
 
         if let Some(ref offsets) = opaque_off {
-            add_mesh_primitive(offsets, opaque_mat_idx, min, max, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
+            add_mesh_primitive(offsets, opaque_mat_idx, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
         }
         if let Some(ref offsets) = transparent_off {
-            add_mesh_primitive(offsets, transparent_mat_idx, min, max, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
+            add_mesh_primitive(offsets, transparent_mat_idx, &mut buffer_views, &mut accessors, &mut primitives, &mut buffer_view_idx);
         }
     }
 
-    // Build glTF JSON
+    // Build glTF JSON with KHR_mesh_quantization extension
     let root = json::Root {
         accessors,
         buffers: vec![json::Buffer {
@@ -304,8 +460,12 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
             matrix: None,
             mesh: Some(json::Index::new(0)),
             rotation: None,
-            scale: None,
-            translation: None,
+            scale: Some([
+                half_ext[0] / 32767.0,
+                half_ext[1] / 32767.0,
+                half_ext[2] / 32767.0,
+            ]),
+            translation: Some(center),
             skin: None,
             weights: None,
         }],
@@ -315,6 +475,8 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
             nodes: vec![json::Index::new(0)],
         }],
         scene: Some(json::Index::new(0)),
+        extensions_used: vec!["KHR_mesh_quantization".to_string()],
+        extensions_required: vec!["KHR_mesh_quantization".to_string()],
         ..Default::default()
     };
 
@@ -402,14 +564,15 @@ fn create_buffer_view(
     }
 }
 
-/// Create an accessor.
+/// Create an accessor with quantization support.
 fn create_accessor(
     buffer_view: u32,
     count: usize,
     type_: json::accessor::Type,
     component_type: json::accessor::ComponentType,
-    min: Option<[f32; 3]>,
-    max: Option<[f32; 3]>,
+    normalized: bool,
+    min: Option<json::Value>,
+    max: Option<json::Value>,
 ) -> json::Accessor {
     json::Accessor {
         buffer_view: Some(json::Index::new(buffer_view)),
@@ -419,9 +582,9 @@ fn create_accessor(
         extensions: Default::default(),
         extras: Default::default(),
         type_: Valid(type_),
-        min: min.map(|m| json::Value::from(m.to_vec())),
-        max: max.map(|m| json::Value::from(m.to_vec())),
-        normalized: false,
+        min,
+        max,
+        normalized,
         sparse: None,
     }
 }
@@ -565,5 +728,89 @@ mod tests {
 
         let glb = export_glb(&output).unwrap();
         assert_eq!(&glb[0..4], b"glTF");
+    }
+
+    #[test]
+    fn test_quantize_position() {
+        let center = [5.0, 5.0, 5.0];
+        let half_ext = [5.0, 5.0, 5.0];
+
+        // Center should map to 0
+        let q = super::quantize_position([5.0, 5.0, 5.0], &center, &half_ext);
+        assert_eq!(q, [0, 0, 0]);
+
+        // Max should map to 32767
+        let q = super::quantize_position([10.0, 10.0, 10.0], &center, &half_ext);
+        assert_eq!(q, [32767, 32767, 32767]);
+
+        // Min should map to -32767
+        let q = super::quantize_position([0.0, 0.0, 0.0], &center, &half_ext);
+        assert_eq!(q, [-32767, -32767, -32767]);
+    }
+
+    #[test]
+    fn test_quantize_normal() {
+        // Axis-aligned normals should quantize exactly
+        assert_eq!(super::quantize_normal([1.0, 0.0, 0.0]), [127, 0, 0]);
+        assert_eq!(super::quantize_normal([0.0, 1.0, 0.0]), [0, 127, 0]);
+        assert_eq!(super::quantize_normal([0.0, 0.0, -1.0]), [0, 0, -127]);
+    }
+
+    #[test]
+    fn test_quantize_color() {
+        assert_eq!(super::quantize_color([1.0, 1.0, 1.0, 1.0]), [255, 255, 255, 255]);
+        assert_eq!(super::quantize_color([0.0, 0.0, 0.0, 0.0]), [0, 0, 0, 0]);
+        assert_eq!(super::quantize_color([0.5, 0.5, 0.5, 1.0]), [128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn test_u16_indices_for_small_meshes() {
+        let mut mesh = Mesh::new();
+        let v0 = mesh.add_vertex(Vertex::new([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0]));
+        let v1 = mesh.add_vertex(Vertex::new([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0]));
+        let v2 = mesh.add_vertex(Vertex::new([0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.0, 1.0]));
+        mesh.add_triangle(v0, v1, v2);
+
+        let output = MesherOutput {
+            opaque_mesh: mesh,
+            transparent_mesh: Mesh::new(),
+            atlas: TextureAtlas::empty(),
+            bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
+            greedy_materials: Vec::new(),
+        };
+
+        let glb = export_glb(&output).unwrap();
+        // Parse the JSON to verify u16 indices
+        let json_chunk_len = u32::from_le_bytes([glb[12], glb[13], glb[14], glb[15]]) as usize;
+        let json_str = std::str::from_utf8(&glb[20..20 + json_chunk_len]).unwrap().trim();
+        // Should contain UNSIGNED_SHORT (5123) for indices, not UNSIGNED_INT (5125)
+        assert!(json_str.contains("5123"), "Expected u16 indices (5123) in JSON");
+    }
+
+    #[test]
+    fn test_quantized_glb_smaller_than_f32() {
+        // Create a mesh with enough vertices to see a meaningful difference
+        let mut mesh = Mesh::new();
+        for i in 0..100 {
+            let x = i as f32;
+            let v0 = mesh.add_vertex(Vertex::new([x, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0]));
+            let v1 = mesh.add_vertex(Vertex::new([x + 1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0]));
+            let v2 = mesh.add_vertex(Vertex::new([x, 0.0, 1.0], [0.0, 1.0, 0.0], [0.0, 1.0]));
+            mesh.add_triangle(v0, v1, v2);
+        }
+
+        let output = MesherOutput {
+            opaque_mesh: mesh,
+            transparent_mesh: Mesh::new(),
+            atlas: TextureAtlas::empty(),
+            bounds: BoundingBox::new([0.0, 0.0, 0.0], [100.0, 0.0, 1.0]),
+            greedy_materials: Vec::new(),
+        };
+
+        let glb = export_glb(&output).unwrap();
+        // 300 vertices × 48 bytes old = 14400 bytes for vertex data alone
+        // 300 vertices × 21 bytes new = 6300 bytes + alignment padding
+        // Total GLB includes JSON + textures, so just verify it's reasonably sized
+        assert!(glb.len() < 14400, "Quantized GLB ({}) should be smaller than old vertex data alone (14400)", glb.len());
     }
 }
