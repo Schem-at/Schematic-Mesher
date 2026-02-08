@@ -463,6 +463,9 @@ fn create_primitive(
 
 /// Create a material with the specified alpha mode and texture index.
 fn create_material_with_texture(alpha_mode: json::material::AlphaMode, texture_idx: u32) -> json::Material {
+    // Opaque materials use backface culling; transparent/blended materials are double-sided
+    // (cross-model plants, etc. need both sides visible)
+    let double_sided = matches!(alpha_mode, json::material::AlphaMode::Blend);
     json::Material {
         pbr_metallic_roughness: json::material::PbrMetallicRoughness {
             base_color_texture: Some(json::texture::Info {
@@ -480,7 +483,7 @@ fn create_material_with_texture(alpha_mode: json::material::AlphaMode, texture_i
         },
         alpha_mode: Valid(alpha_mode),
         alpha_cutoff: None,
-        double_sided: true,
+        double_sided,
         normal_texture: None,
         occlusion_texture: None,
         emissive_texture: None,

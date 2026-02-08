@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GLB Debug Viewer</title>
+<style>
+  body { margin: 0; overflow: hidden; background: #1a1a2e; }
+  canvas { display: block; }
+  #status {
+    position: fixed; top: 10px; left: 10px;
+    color: #888; font: 12px monospace;
+    background: rgba(0,0,0,0.5); padding: 4px 8px; border-radius: 4px;
+  }
+  #status.reload { color: #4ec9b0; }
+</style>
+</head>
+<body>
+<div id="status">waiting...</div>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const GLB_FILE = 'debug.glb';
+const POLL_MS = 500;
+
+// Setup
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.01, 1000);
+camera.position.set(4, 4, 4);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(devicePixelRatio);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.target.set(0, 0.5, 0);
+
+// Lighting
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+dir.position.set(5, 10, 5);
+scene.add(dir);
+
+// Grid
+const grid = new THREE.GridHelper(20, 20, 0x444466, 0x333355);
+scene.add(grid);
+
+// State
+let currentModel = null;
+let lastModified = null;
+const loader = new GLTFLoader();
+const status = document.getElementById('status');
+
+function loadGLB() {
+  const url = GLB_FILE + '?t=' + Date.now();
+  loader.load(url, (gltf) => {
+    if (currentModel) scene.remove(currentModel);
+    currentModel = gltf.scene;
+    scene.add(currentModel);
+
+    // Auto-center camera on first load
+    if (!lastModified) {
+      const box = new THREE.Box3().setFromObject(currentModel);
+      const center = box.getCenter(new THREE.Vector3());
+      const size = box.getSize(new THREE.Vector3());
+      controls.target.copy(center);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      camera.position.copy(center).add(new THREE.Vector3(maxDim, maxDim, maxDim));
+      controls.update();
+    }
+
+    status.textContent = 'loaded ' + new Date().toLocaleTimeString();
+    status.className = 'reload';
+    setTimeout(() => status.className = '', 1000);
+  }, undefined, (err) => {
+    status.textContent = 'error: ' + err.message;
+  });
+}
+
+// Poll for file changes via HEAD request
+async function poll() {
+  try {
+    const res = await fetch(GLB_FILE, { method: 'HEAD' });
+    const mod = res.headers.get('Last-Modified') || res.headers.get('Content-Length');
+    if (mod !== lastModified) {
+      lastModified = mod;
+      loadGLB();
+    }
+  } catch(e) {
+    status.textContent = 'server not running';
+  }
+  setTimeout(poll, POLL_MS);
+}
+
+// Resize
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Render loop
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+animate();
+poll();
+</script>
+</body>
+</html>

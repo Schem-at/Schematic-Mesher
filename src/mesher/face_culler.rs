@@ -135,6 +135,27 @@ impl<'a> FaceCuller<'a> {
         }
     }
 
+    /// Build a cache key from a block's name and properties.
+    fn cache_key(block: &InputBlock) -> String {
+        if block.properties.is_empty() {
+            block.name.clone()
+        } else {
+            let mut props: Vec<_> = block.properties.iter().collect();
+            props.sort_by_key(|(k, _)| k.as_str());
+            let mut key = block.name.clone();
+            key.push('|');
+            for (i, (k, v)) in props.iter().enumerate() {
+                if i > 0 {
+                    key.push(',');
+                }
+                key.push_str(k);
+                key.push('=');
+                key.push_str(v);
+            }
+            key
+        }
+    }
+
     /// Classify a block for culling purposes.
     fn classify_block(&mut self, block: &InputBlock) -> BlockCullType {
         // Air is never solid
@@ -142,14 +163,15 @@ impl<'a> FaceCuller<'a> {
             return BlockCullType::NonSolid;
         }
 
-        // Check cache first
-        if let Some(cached) = self.cull_cache.get(&block.name) {
+        // Check cache first (keyed by name + properties)
+        let key = Self::cache_key(block);
+        if let Some(cached) = self.cull_cache.get(&key) {
             return cached.clone();
         }
 
         // Classify the block
         let cull_type = self.resolve_and_classify(block);
-        self.cull_cache.insert(block.name.clone(), cull_type.clone());
+        self.cull_cache.insert(key, cull_type.clone());
         cull_type
     }
 

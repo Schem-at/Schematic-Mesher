@@ -587,8 +587,10 @@ impl<'a> MeshBuilder<'a> {
             return *positions;
         }
 
-        let x_rot = Mat3::from_rotation_x((transform.x as f32).to_radians());
-        let y_rot = Mat3::from_rotation_y((transform.y as f32).to_radians());
+        // Negate angles: Minecraft rotations are clockwise from above (Y) and
+        // from +X looking toward origin (X), but glam uses right-hand rule (CCW).
+        let x_rot = Mat3::from_rotation_x((-transform.x as f32).to_radians());
+        let y_rot = Mat3::from_rotation_y((-transform.y as f32).to_radians());
         let rotation_matrix = y_rot * x_rot;
 
         let mut result = [[0.0; 3]; 4];
@@ -606,8 +608,8 @@ impl<'a> MeshBuilder<'a> {
             return normal;
         }
 
-        let x_rot = Mat3::from_rotation_x((transform.x as f32).to_radians());
-        let y_rot = Mat3::from_rotation_y((transform.y as f32).to_radians());
+        let x_rot = Mat3::from_rotation_x((-transform.x as f32).to_radians());
+        let y_rot = Mat3::from_rotation_y((-transform.y as f32).to_radians());
         let rotation_matrix = y_rot * x_rot;
 
         let n = Vec3::new(normal[0], normal[1], normal[2]);
