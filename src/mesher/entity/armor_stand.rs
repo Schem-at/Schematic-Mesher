@@ -3,10 +3,23 @@ use crate::mesher::geometry::Vertex;
 use crate::types::InputBlock;
 use glam::{Mat4, Vec3};
 
+/// Parse a pose property string "x,y,z" (degrees) into [rx, ry, rz] radians.
+pub(super) fn parse_pose(s: &str) -> [f32; 3] {
+    let parts: Vec<f32> = s.split(',')
+        .map(|p| p.trim().parse::<f32>().unwrap_or(0.0).to_radians())
+        .collect();
+    [
+        *parts.first().unwrap_or(&0.0),
+        *parts.get(1).unwrap_or(&0.0),
+        *parts.get(2).unwrap_or(&0.0),
+    ]
+}
+
 /// Armor stand model — texture `entity/armorstand/wood`, 64×64.
 /// 10 parts from ArmorStandModel.java (MC 1.21.4).
-pub(super) fn armor_stand_model() -> EntityModelDef {
-    let head = EntityPart {
+/// Accepts block to read optional pose properties (HeadPose, BodyPose, etc.).
+pub(super) fn armor_stand_model(block: &InputBlock) -> EntityModelDef {
+    let mut head = EntityPart {
         cubes: vec![EntityCube {
             origin: [-1.0, -7.0, -1.0],
             dimensions: [2.0, 7.0, 2.0],
@@ -22,7 +35,7 @@ pub(super) fn armor_stand_model() -> EntityModelDef {
         children: vec![],
     };
 
-    let body = EntityPart {
+    let mut body = EntityPart {
         cubes: vec![EntityCube {
             origin: [-6.0, 0.0, -1.5],
             dimensions: [12.0, 3.0, 3.0],
@@ -35,7 +48,7 @@ pub(super) fn armor_stand_model() -> EntityModelDef {
         children: vec![],
     };
 
-    let right_arm = EntityPart {
+    let mut right_arm = EntityPart {
         cubes: vec![EntityCube {
             origin: [-2.0, -2.0, -1.0],
             dimensions: [2.0, 12.0, 2.0],
@@ -51,7 +64,7 @@ pub(super) fn armor_stand_model() -> EntityModelDef {
         children: vec![],
     };
 
-    let left_arm = EntityPart {
+    let mut left_arm = EntityPart {
         cubes: vec![EntityCube {
             origin: [0.0, -2.0, -1.0],
             dimensions: [2.0, 12.0, 2.0],
@@ -67,7 +80,7 @@ pub(super) fn armor_stand_model() -> EntityModelDef {
         children: vec![],
     };
 
-    let right_leg = EntityPart {
+    let mut right_leg = EntityPart {
         cubes: vec![EntityCube {
             origin: [-1.0, 0.0, -1.0],
             dimensions: [2.0, 11.0, 2.0],
@@ -83,7 +96,7 @@ pub(super) fn armor_stand_model() -> EntityModelDef {
         children: vec![],
     };
 
-    let left_leg = EntityPart {
+    let mut left_leg = EntityPart {
         cubes: vec![EntityCube {
             origin: [-1.0, 0.0, -1.0],
             dimensions: [2.0, 11.0, 2.0],
@@ -153,6 +166,26 @@ pub(super) fn armor_stand_model() -> EntityModelDef {
         },
         children: vec![],
     };
+
+    // Apply pose overrides from block properties (degrees → radians)
+    if let Some(pose) = block.properties.get("HeadPose") {
+        head.pose.rotation = parse_pose(pose);
+    }
+    if let Some(pose) = block.properties.get("BodyPose") {
+        body.pose.rotation = parse_pose(pose);
+    }
+    if let Some(pose) = block.properties.get("RightArmPose") {
+        right_arm.pose.rotation = parse_pose(pose);
+    }
+    if let Some(pose) = block.properties.get("LeftArmPose") {
+        left_arm.pose.rotation = parse_pose(pose);
+    }
+    if let Some(pose) = block.properties.get("RightLegPose") {
+        right_leg.pose.rotation = parse_pose(pose);
+    }
+    if let Some(pose) = block.properties.get("LeftLegPose") {
+        left_leg.pose.rotation = parse_pose(pose);
+    }
 
     // Y-down → Y-up root wrapper (same as other humanoid mobs)
     let root = EntityPart {

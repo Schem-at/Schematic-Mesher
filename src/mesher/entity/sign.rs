@@ -1,8 +1,8 @@
 use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose, SignWood};
 
-/// Sign model.
-pub(super) fn sign_model(wood: SignWood, is_wall: bool) -> EntityModelDef {
-    let texture_path = match wood {
+/// Get the texture path for a sign wood type.
+pub(crate) fn sign_texture_path(wood: SignWood) -> &'static str {
+    match wood {
         SignWood::Oak => "entity/signs/oak",
         SignWood::Spruce => "entity/signs/spruce",
         SignWood::Birch => "entity/signs/birch",
@@ -14,7 +14,12 @@ pub(super) fn sign_model(wood: SignWood, is_wall: bool) -> EntityModelDef {
         SignWood::Mangrove => "entity/signs/mangrove",
         SignWood::Cherry => "entity/signs/cherry",
         SignWood::Bamboo => "entity/signs/bamboo",
-    };
+    }
+}
+
+/// Sign model.
+pub(super) fn sign_model(wood: SignWood, is_wall: bool) -> EntityModelDef {
+    let texture_path = sign_texture_path(wood);
 
     // Sign uses Java Y-down coords. Renderer applies RotX(PI) + 2/3 scale.
     // Standing: position [8, 8, 8] (centered, stick bottom at y=0)
@@ -71,6 +76,66 @@ pub(super) fn sign_model(wood: SignWood, is_wall: bool) -> EntityModelDef {
     EntityModelDef {
         texture_path: texture_path.to_string(),
         texture_size: [64, 32],
+        parts,
+        is_opaque: true,
+    }
+}
+
+/// Sign model with a custom (dynamic) texture path and 4x upscaled texture_size.
+/// Used when text is composited onto the sign texture — the tex_offsets are scaled 4x
+/// so that UVs map to the same normalized positions on the larger texture.
+pub(crate) fn sign_model_upscaled(custom_texture: &str, is_wall: bool) -> EntityModelDef {
+    let (pos_x, pos_y, pos_z) = if is_wall {
+        (8.0, 3.0, 15.0)
+    } else {
+        (8.0, 8.0, 8.0)
+    };
+    let scale = 2.0 / 3.0;
+
+    // Board with 4x tex_offset: [0,0] → [0,0] (still zero)
+    let board = EntityPart {
+        cubes: vec![EntityCube {
+            origin: [-12.0, -14.0, -1.0],
+            dimensions: [24.0, 12.0, 2.0],
+            tex_offset: [0, 0],
+            inflate: 0.0,
+            mirror: false,
+            skip_faces: vec![],
+        }],
+        pose: EntityPartPose {
+            position: [pos_x, pos_y, pos_z],
+            rotation: [std::f32::consts::PI, 0.0, 0.0],
+            scale: [scale, scale, scale],
+        },
+        children: vec![],
+    };
+
+    let mut parts = vec![board];
+
+    if !is_wall {
+        // Stick: tex_offset [0,14] → [0,56] at 4x
+        let stick = EntityPart {
+            cubes: vec![EntityCube {
+                origin: [-1.0, -2.0, -1.0],
+                dimensions: [2.0, 14.0, 2.0],
+                tex_offset: [0, 14 * 4],
+                inflate: 0.0,
+                mirror: false,
+                skip_faces: vec![],
+            }],
+            pose: EntityPartPose {
+                position: [pos_x, pos_y, pos_z],
+                rotation: [std::f32::consts::PI, 0.0, 0.0],
+                scale: [scale, scale, scale],
+            },
+            children: vec![],
+        };
+        parts.push(stick);
+    }
+
+    EntityModelDef {
+        texture_path: custom_texture.to_string(),
+        texture_size: [64 * 4, 32 * 4],
         parts,
         is_opaque: true,
     }

@@ -8,23 +8,36 @@
 //! vertices/indices/face textures, then integrate in MeshBuilder::add_block().
 
 pub mod armor_stand;
+mod bat;
 pub(crate) mod banner;
 mod bed;
 mod bell;
+mod book;
+mod cat;
 mod chicken;
 mod chest;
 mod cow;
+pub(crate) mod decorated_pot;
+mod enderman;
+pub(crate) mod hanging_sign;
+mod horse;
+mod iron_golem;
 mod item_frame;
 pub(crate) mod inventory;
 pub mod item_render;
 mod minecart;
 mod mob;
 pub(crate) mod particle;
+pub(crate) mod player;
 pub(crate) mod sheep;
 mod shulker;
-mod sign;
-mod skull;
+pub(crate) mod sign;
+pub(crate) mod sign_text;
+pub(crate) mod skull;
+mod slime;
+mod spider;
 mod villager;
+mod wolf;
 
 use crate::mesher::geometry::Vertex;
 use crate::types::{Direction, InputBlock};
@@ -117,7 +130,7 @@ pub enum SignWood {
 /// Skull/head types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkullType {
-    Skeleton, WitherSkeleton, Zombie, Creeper, Piglin, Dragon,
+    Skeleton, WitherSkeleton, Zombie, Creeper, Piglin, Dragon, Player,
 }
 
 /// Block entity type detected from block ID.
@@ -131,6 +144,10 @@ pub enum BlockEntityType {
     Skull(SkullType),
     ShulkerBox { color: Option<String> },
     Banner { color: String, is_wall: bool },
+    HangingSign { wood: SignWood, is_wall: bool },
+    DecoratedPot,
+    Lectern,
+    EnchantingTable,
 }
 
 /// Mob entity types (rendered as static models).
@@ -149,6 +166,15 @@ pub enum MobType {
     ItemFrame,
     GlowItemFrame,
     DroppedItem,
+    Wolf,
+    Cat,
+    Spider,
+    Horse,
+    Enderman,
+    Slime,
+    IronGolem,
+    Bat,
+    Player,
 }
 
 /// Face texture info for a generated entity face.
@@ -158,6 +184,23 @@ pub struct EntityFaceTexture {
 }
 
 // ── Detection ───────────────────────────────────────────────────────────────
+
+/// Parse a wood type string into a SignWood enum.
+fn parse_sign_wood(s: &str) -> SignWood {
+    match s {
+        "spruce" => SignWood::Spruce,
+        "birch" => SignWood::Birch,
+        "jungle" => SignWood::Jungle,
+        "acacia" => SignWood::Acacia,
+        "dark_oak" => SignWood::DarkOak,
+        "crimson" => SignWood::Crimson,
+        "warped" => SignWood::Warped,
+        "mangrove" => SignWood::Mangrove,
+        "cherry" => SignWood::Cherry,
+        "bamboo" => SignWood::Bamboo,
+        _ => SignWood::Oak,
+    }
+}
 
 /// Detect if a block is a block entity that needs hardcoded geometry.
 pub fn detect_block_entity(block: &InputBlock) -> Option<BlockEntityType> {
@@ -193,31 +236,30 @@ pub fn detect_block_entity(block: &InputBlock) -> Option<BlockEntityType> {
         // Bell
         "bell" => Some(BlockEntityType::Bell),
 
-        // Signs
-        id if id.ends_with("_sign") || id.ends_with("_hanging_sign") => {
-            // Skip hanging signs for now
-            if id.contains("hanging") {
-                return None;
-            }
+        // Hanging signs (must check before regular signs)
+        id if id.ends_with("_hanging_sign") => {
+            let is_wall = id.contains("_wall_hanging_sign");
+            let wood_str = if is_wall {
+                id.strip_suffix("_wall_hanging_sign").unwrap_or("oak")
+            } else {
+                id.strip_suffix("_hanging_sign").unwrap_or("oak")
+            };
+            let wood = parse_sign_wood(wood_str);
+            Some(BlockEntityType::HangingSign { wood, is_wall })
+        }
+
+        // Regular signs
+        id if id.ends_with("_sign") => {
             let is_wall = id.starts_with("wall_") || id.contains("_wall_");
             let wood_str = id.strip_suffix("_sign")
                 .and_then(|s| s.strip_prefix("wall_").or(Some(s)))
                 .unwrap_or("oak");
-            let wood = match wood_str {
-                "spruce" => SignWood::Spruce,
-                "birch" => SignWood::Birch,
-                "jungle" => SignWood::Jungle,
-                "acacia" => SignWood::Acacia,
-                "dark_oak" => SignWood::DarkOak,
-                "crimson" => SignWood::Crimson,
-                "warped" => SignWood::Warped,
-                "mangrove" => SignWood::Mangrove,
-                "cherry" => SignWood::Cherry,
-                "bamboo" => SignWood::Bamboo,
-                _ => SignWood::Oak,
-            };
+            let wood = parse_sign_wood(wood_str);
             Some(BlockEntityType::Sign { wood, is_wall })
         }
+
+        // Decorated pots
+        "decorated_pot" => Some(BlockEntityType::DecoratedPot),
 
         // Skulls / Heads
         "skeleton_skull" | "skeleton_wall_skull" =>
@@ -233,7 +275,7 @@ pub fn detect_block_entity(block: &InputBlock) -> Option<BlockEntityType> {
         "dragon_head" | "dragon_wall_head" =>
             Some(BlockEntityType::Skull(SkullType::Dragon)),
         "player_head" | "player_wall_head" =>
-            Some(BlockEntityType::Skull(SkullType::Skeleton)), // fallback texture
+            Some(BlockEntityType::Skull(SkullType::Player)),
 
         // Banners
         id if id.ends_with("_banner") || id.ends_with("_wall_banner") => {
@@ -245,6 +287,21 @@ pub fn detect_block_entity(block: &InputBlock) -> Option<BlockEntityType> {
             };
             Some(BlockEntityType::Banner { color, is_wall })
         }
+
+        // Lectern (only when it has a book)
+        "lectern" => {
+            let has_book = block.properties.get("has_book")
+                .map(|v| v == "true")
+                .unwrap_or(false);
+            if has_book {
+                Some(BlockEntityType::Lectern)
+            } else {
+                None
+            }
+        }
+
+        // Enchanting table (always shows a book)
+        "enchanting_table" => Some(BlockEntityType::EnchantingTable),
 
         // Shulker Boxes
         "shulker_box" => Some(BlockEntityType::ShulkerBox { color: None }),
@@ -274,6 +331,15 @@ pub fn detect_mob(block: &InputBlock) -> Option<MobType> {
         "item_frame" => Some(MobType::ItemFrame),
         "glow_item_frame" => Some(MobType::GlowItemFrame),
         "item" => Some(MobType::DroppedItem),
+        "wolf" => Some(MobType::Wolf),
+        "cat" => Some(MobType::Cat),
+        "spider" => Some(MobType::Spider),
+        "horse" => Some(MobType::Horse),
+        "enderman" => Some(MobType::Enderman),
+        "slime" => Some(MobType::Slime),
+        "iron_golem" => Some(MobType::IronGolem),
+        "bat" => Some(MobType::Bat),
+        "player" => Some(MobType::Player),
         _ => None,
     }
 }
@@ -396,7 +462,38 @@ pub fn generate_entity_geometry(
     let mut face_textures = Vec::new();
 
     // Build facing rotation matrix
-    let facing_mat = if matches!(entity_type, BlockEntityType::ShulkerBox { .. }) {
+    let facing_mat = if matches!(entity_type, BlockEntityType::Lectern | BlockEntityType::EnchantingTable) {
+        // Book model: scale 0.675, position on block surface, optional tilt
+        // Book geometry is centered at origin in 1/16th units, traverse_parts divides by 16.
+        // We apply: facing_rotation × translation × tilt × scale
+        let facing_angle = facing_rotation_rad(facing);
+        let scale = 0.675;
+
+        let (book_y, tilt_x) = match entity_type {
+            BlockEntityType::Lectern => {
+                // Lectern surface is at y≈14.25/16, book sits on angled surface
+                // Lectern top surface is tilted ~22.5° (PI/8)
+                (14.25 / 16.0, std::f32::consts::FRAC_PI_8)
+            }
+            _ => {
+                // Enchanting table: book floats above at y≈12/16
+                (12.0 / 16.0, 0.0)
+            }
+        };
+
+        // Book center position in block-local space
+        let book_center = Vec3::new(0.5, book_y, 0.5);
+
+        // Build transform: facing rotation around block center, then position book, then tilt, then scale
+        let facing_rot = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+            * Mat4::from_rotation_y(facing_angle)
+            * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5));
+
+        facing_rot
+            * Mat4::from_translation(book_center)
+            * Mat4::from_rotation_x(tilt_x)
+            * Mat4::from_scale(Vec3::splat(scale))
+    } else if matches!(entity_type, BlockEntityType::ShulkerBox { .. }) {
         // Shulker boxes use 6-direction facing (up/down/north/south/east/west)
         // Rotate around full block center (0.5, 0.5, 0.5)
         let center = Vec3::new(0.5, 0.5, 0.5);
@@ -415,6 +512,7 @@ pub fn generate_entity_geometry(
         let facing_angle = match entity_type {
             BlockEntityType::Banner { is_wall: false, .. } => standing_rotation_rad(block),
             BlockEntityType::Sign { is_wall: false, .. } => standing_rotation_rad(block),
+            BlockEntityType::HangingSign { is_wall: false, .. } => standing_rotation_rad(block),
             BlockEntityType::Skull(_) => {
                 let block_id = block.block_id();
                 if block_id.contains("wall") {
@@ -457,12 +555,12 @@ pub fn generate_mob_geometry(
         return item_frame::generate_item_frame_geometry(facing, is_glow);
     }
 
-    // Dropped items are rendered entirely in add_mob() with resource pack access
-    if matches!(mob_type, MobType::DroppedItem) {
+    // Dropped items and players are rendered entirely in add_mob() with resource pack access
+    if matches!(mob_type, MobType::DroppedItem | MobType::Player) {
         return (Vec::new(), Vec::new(), Vec::new());
     }
 
-    let model = mob::build_mob_model(mob_type);
+    let model = mob::build_mob_model(mob_type, block);
 
     let facing = get_facing(block);
     let facing_angle = facing_rotation_rad(facing);
@@ -661,6 +759,14 @@ fn build_model_def(entity_type: &BlockEntityType) -> EntityModelDef {
             // Texture path will be overridden by dynamic texture in add_entity
             banner::banner_model(!is_wall, "_banner/default")
         }
+        BlockEntityType::HangingSign { wood, is_wall } => {
+            hanging_sign::hanging_sign_model(*wood, *is_wall)
+        }
+        BlockEntityType::DecoratedPot => {
+            // Decorated pot uses custom per-face geometry, this is a fallback
+            unreachable!("Decorated pots handled directly in add_entity")
+        }
+        BlockEntityType::Lectern | BlockEntityType::EnchantingTable => book::book_model(),
     }
 }
 
@@ -1072,6 +1178,116 @@ mod tests {
     }
 
     #[test]
+    fn test_detect_new_mobs_wave2() {
+        assert!(matches!(detect_mob(&InputBlock::new("entity:wolf")), Some(MobType::Wolf)));
+        assert!(matches!(detect_mob(&InputBlock::new("entity:cat")), Some(MobType::Cat)));
+        assert!(matches!(detect_mob(&InputBlock::new("entity:spider")), Some(MobType::Spider)));
+        assert!(matches!(detect_mob(&InputBlock::new("entity:horse")), Some(MobType::Horse)));
+        assert!(matches!(detect_mob(&InputBlock::new("entity:enderman")), Some(MobType::Enderman)));
+        assert!(matches!(detect_mob(&InputBlock::new("entity:slime")), Some(MobType::Slime)));
+        assert!(matches!(detect_mob(&InputBlock::new("entity:iron_golem")), Some(MobType::IronGolem)));
+        assert!(matches!(detect_mob(&InputBlock::new("entity:bat")), Some(MobType::Bat)));
+    }
+
+    #[test]
+    fn test_wolf_geometry_count() {
+        let block = InputBlock::new("entity:wolf").with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Wolf);
+        // Wolf: head(1) + 2 ears + snout + body + tail + 4 legs = 10 cubes × 6 = 60 faces
+        assert_eq!(faces.len(), 60);
+        assert_eq!(verts.len(), 60 * 4);
+        assert_eq!(indices.len(), 60 * 6);
+    }
+
+    #[test]
+    fn test_cat_geometry_count() {
+        let block = InputBlock::new("entity:cat").with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Cat);
+        // Cat: head + body + 2 tails + 4 legs = 8 cubes × 6 = 48 faces
+        assert_eq!(faces.len(), 48);
+        assert_eq!(verts.len(), 48 * 4);
+        assert_eq!(indices.len(), 48 * 6);
+    }
+
+    #[test]
+    fn test_spider_geometry_count() {
+        let block = InputBlock::new("entity:spider").with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Spider);
+        // Spider: head + neck + abdomen + 8 legs = 11 cubes × 6 = 66 faces
+        assert_eq!(faces.len(), 66);
+        assert_eq!(verts.len(), 66 * 4);
+        assert_eq!(indices.len(), 66 * 6);
+    }
+
+    #[test]
+    fn test_horse_geometry_count() {
+        let block = InputBlock::new("entity:horse").with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Horse);
+        // Horse: head_parts(1) + mane + mouth + body + tail + 4 legs = 9 cubes × 6 = 54 faces
+        assert_eq!(faces.len(), 54);
+        assert_eq!(verts.len(), 54 * 4);
+        assert_eq!(indices.len(), 54 * 6);
+    }
+
+    #[test]
+    fn test_enderman_geometry_count() {
+        let block = InputBlock::new("entity:enderman").with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Enderman);
+        // Enderman: head + hat + body + 2 arms + 2 legs = 7 cubes × 6 = 42 faces
+        assert_eq!(faces.len(), 42);
+        assert_eq!(verts.len(), 42 * 4);
+        assert_eq!(indices.len(), 42 * 6);
+    }
+
+    #[test]
+    fn test_slime_geometry_count() {
+        let block = InputBlock::new("entity:slime").with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Slime);
+        // Slime: outer + inner + 2 eyes + mouth = 5 cubes × 6 = 30 faces
+        assert_eq!(faces.len(), 30);
+        assert_eq!(verts.len(), 30 * 4);
+        assert_eq!(indices.len(), 30 * 6);
+    }
+
+    #[test]
+    fn test_iron_golem_geometry_count() {
+        let block = InputBlock::new("entity:iron_golem").with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::IronGolem);
+        // Iron golem: head(1) + nose + body + waist + 2 arms + 2 legs = 8 cubes × 6 = 48 faces
+        assert_eq!(faces.len(), 48);
+        assert_eq!(verts.len(), 48 * 4);
+        assert_eq!(indices.len(), 48 * 6);
+    }
+
+    #[test]
+    fn test_bat_geometry_count() {
+        let block = InputBlock::new("entity:bat").with_property("facing", "south");
+        let (verts, indices, faces) = generate_mob_geometry(&block, MobType::Bat);
+        // Bat: head + body + 2 wings (each with wing_tip child) = 6 cubes × 6 = 36 faces
+        assert_eq!(faces.len(), 36);
+        assert_eq!(verts.len(), 36 * 4);
+        assert_eq!(indices.len(), 36 * 6);
+    }
+
+    #[test]
+    fn test_armor_stand_pose() {
+        let block = InputBlock::new("entity:armor_stand")
+            .with_property("facing", "south")
+            .with_property("RightArmPose", "-10,0,-10");
+        let (verts, _indices, faces) = generate_mob_geometry(&block, MobType::ArmorStand);
+        // Same face count as normal armor stand
+        assert_eq!(faces.len(), 60);
+        // Vertices should differ from default pose
+        let default_block = InputBlock::new("entity:armor_stand")
+            .with_property("facing", "south");
+        let (default_verts, _, _) = generate_mob_geometry(&default_block, MobType::ArmorStand);
+        let any_different = verts.iter().zip(default_verts.iter())
+            .any(|(a, b)| (a.position[0] - b.position[0]).abs() > 0.001
+                       || (a.position[1] - b.position[1]).abs() > 0.001);
+        assert!(any_different, "Posed armor stand should have different vertex positions");
+    }
+
+    #[test]
     fn test_detect_banner() {
         let block = InputBlock::new("minecraft:white_banner");
         match detect_block_entity(&block) {
@@ -1101,5 +1317,207 @@ mod tests {
 
         let empty = banner::parse_patterns("");
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_detect_hanging_sign() {
+        let block = InputBlock::new("minecraft:oak_hanging_sign");
+        match detect_block_entity(&block) {
+            Some(BlockEntityType::HangingSign { wood, is_wall }) => {
+                assert_eq!(wood, SignWood::Oak);
+                assert!(!is_wall);
+            }
+            other => panic!("Expected HangingSign, got {:?}", other),
+        }
+
+        let block = InputBlock::new("minecraft:birch_wall_hanging_sign");
+        match detect_block_entity(&block) {
+            Some(BlockEntityType::HangingSign { wood, is_wall }) => {
+                assert_eq!(wood, SignWood::Birch);
+                assert!(is_wall);
+            }
+            other => panic!("Expected wall HangingSign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_hanging_sign_ceiling_geometry_count() {
+        let block = InputBlock::new("minecraft:oak_hanging_sign")
+            .with_property("rotation", "0");
+        let entity_type = BlockEntityType::HangingSign { wood: SignWood::Oak, is_wall: false };
+        let (verts, indices, faces) = generate_entity_geometry(&block, &entity_type);
+
+        // Ceiling: board(6) + plank(6) + left_chain(6) + right_chain(6) = 24 faces
+        assert_eq!(faces.len(), 24);
+        assert_eq!(verts.len(), 24 * 4);
+        assert_eq!(indices.len(), 24 * 6);
+    }
+
+    #[test]
+    fn test_hanging_sign_wall_geometry_count() {
+        let block = InputBlock::new("minecraft:oak_wall_hanging_sign")
+            .with_property("facing", "north");
+        let entity_type = BlockEntityType::HangingSign { wood: SignWood::Oak, is_wall: true };
+        let (verts, indices, faces) = generate_entity_geometry(&block, &entity_type);
+
+        // Wall: board only = 6 faces
+        assert_eq!(faces.len(), 6);
+        assert_eq!(verts.len(), 6 * 4);
+        assert_eq!(indices.len(), 6 * 6);
+    }
+
+    #[test]
+    fn test_detect_decorated_pot() {
+        let block = InputBlock::new("minecraft:decorated_pot");
+        assert!(matches!(detect_block_entity(&block), Some(BlockEntityType::DecoratedPot)));
+    }
+
+    #[test]
+    fn test_decorated_pot_geometry_count() {
+        let block = InputBlock::new("minecraft:decorated_pot")
+            .with_property("facing", "north");
+        let (verts, indices, faces) = decorated_pot::generate_decorated_pot_geometry(&block);
+
+        // 3 boxes × 6 faces = 18 faces
+        assert_eq!(faces.len(), 18);
+        assert_eq!(verts.len(), 18 * 4);
+        assert_eq!(indices.len(), 18 * 6);
+    }
+
+    #[test]
+    fn test_baby_mob_scaling() {
+        let adult = InputBlock::new("entity:pig")
+            .with_property("facing", "south");
+        let baby = InputBlock::new("entity:pig")
+            .with_property("facing", "south")
+            .with_property("is_baby", "true");
+
+        let (adult_verts, _, adult_faces) = generate_mob_geometry(&adult, MobType::Pig);
+        let (baby_verts, _, baby_faces) = generate_mob_geometry(&baby, MobType::Pig);
+
+        // Same face count
+        assert_eq!(adult_faces.len(), baby_faces.len());
+
+        // Baby should have smaller Y extent (closer to ground)
+        let adult_max_y = adult_verts.iter().map(|v| v.position[1]).fold(f32::NEG_INFINITY, f32::max);
+        let baby_max_y = baby_verts.iter().map(|v| v.position[1]).fold(f32::NEG_INFINITY, f32::max);
+        assert!(baby_max_y < adult_max_y, "Baby should be shorter than adult");
+    }
+
+    #[test]
+    fn test_baby_scaling_not_applied_to_unsupported() {
+        // Spider doesn't support baby scaling
+        let normal = InputBlock::new("entity:spider")
+            .with_property("facing", "south");
+        let baby = InputBlock::new("entity:spider")
+            .with_property("facing", "south")
+            .with_property("is_baby", "true");
+
+        let (normal_verts, _, _) = generate_mob_geometry(&normal, MobType::Spider);
+        let (baby_verts, _, _) = generate_mob_geometry(&baby, MobType::Spider);
+
+        // Positions should be identical since spider doesn't support baby
+        let all_same = normal_verts.iter().zip(baby_verts.iter())
+            .all(|(a, b)| (a.position[0] - b.position[0]).abs() < 0.001
+                       && (a.position[1] - b.position[1]).abs() < 0.001
+                       && (a.position[2] - b.position[2]).abs() < 0.001);
+        assert!(all_same, "Spider should not be affected by baby scaling");
+    }
+
+    #[test]
+    fn test_detect_lectern_with_book() {
+        let block = InputBlock::new("minecraft:lectern")
+            .with_property("has_book", "true")
+            .with_property("facing", "north");
+        assert!(matches!(detect_block_entity(&block), Some(BlockEntityType::Lectern)));
+    }
+
+    #[test]
+    fn test_detect_lectern_without_book() {
+        let block = InputBlock::new("minecraft:lectern")
+            .with_property("has_book", "false")
+            .with_property("facing", "north");
+        assert!(detect_block_entity(&block).is_none());
+    }
+
+    #[test]
+    fn test_detect_lectern_no_property() {
+        let block = InputBlock::new("minecraft:lectern")
+            .with_property("facing", "north");
+        assert!(detect_block_entity(&block).is_none());
+    }
+
+    #[test]
+    fn test_detect_enchanting_table() {
+        let block = InputBlock::new("minecraft:enchanting_table");
+        assert!(matches!(detect_block_entity(&block), Some(BlockEntityType::EnchantingTable)));
+    }
+
+    #[test]
+    fn test_lectern_book_geometry_count() {
+        let block = InputBlock::new("minecraft:lectern")
+            .with_property("has_book", "true")
+            .with_property("facing", "north");
+        let (verts, indices, faces) = generate_entity_geometry(
+            &block,
+            &BlockEntityType::Lectern,
+        );
+
+        // Book: 7 parts × 6 faces = 42 faces
+        assert_eq!(faces.len(), 42);
+        assert_eq!(verts.len(), 42 * 4);
+        assert_eq!(indices.len(), 42 * 6);
+    }
+
+    #[test]
+    fn test_enchanting_table_book_geometry_count() {
+        let block = InputBlock::new("minecraft:enchanting_table")
+            .with_property("facing", "north");
+        let (verts, indices, faces) = generate_entity_geometry(
+            &block,
+            &BlockEntityType::EnchantingTable,
+        );
+
+        // Book: 7 parts × 6 faces = 42 faces
+        assert_eq!(faces.len(), 42);
+        assert_eq!(verts.len(), 42 * 4);
+        assert_eq!(indices.len(), 42 * 6);
+    }
+
+    #[test]
+    fn test_lectern_book_is_transparent() {
+        let block = InputBlock::new("minecraft:lectern")
+            .with_property("has_book", "true")
+            .with_property("facing", "north");
+        let (_, _, faces) = generate_entity_geometry(
+            &block,
+            &BlockEntityType::Lectern,
+        );
+
+        // All faces should be transparent (book has thin pages)
+        assert!(faces.iter().all(|f| f.is_transparent));
+    }
+
+    #[test]
+    fn test_lectern_vs_enchanting_table_different_positions() {
+        let lectern_block = InputBlock::new("minecraft:lectern")
+            .with_property("has_book", "true")
+            .with_property("facing", "north");
+        let table_block = InputBlock::new("minecraft:enchanting_table")
+            .with_property("facing", "north");
+
+        let (lectern_verts, _, _) = generate_entity_geometry(
+            &lectern_block,
+            &BlockEntityType::Lectern,
+        );
+        let (table_verts, _, _) = generate_entity_geometry(
+            &table_block,
+            &BlockEntityType::EnchantingTable,
+        );
+
+        // Lectern book should be higher (y≈14.25/16) than enchanting table (y≈12/16)
+        let lectern_avg_y: f32 = lectern_verts.iter().map(|v| v.position[1]).sum::<f32>() / lectern_verts.len() as f32;
+        let table_avg_y: f32 = table_verts.iter().map(|v| v.position[1]).sum::<f32>() / table_verts.len() as f32;
+        assert!(lectern_avg_y > table_avg_y, "Lectern book should be higher than enchanting table book");
     }
 }

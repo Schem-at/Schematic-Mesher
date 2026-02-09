@@ -81,6 +81,11 @@ impl FluidState {
     }
 }
 
+/// Check if a block has the `waterlogged=true` property.
+pub fn is_waterlogged(block: &InputBlock) -> bool {
+    block.properties.get("waterlogged").map(|v| v == "true").unwrap_or(false)
+}
+
 /// Get the fluid state at a neighboring position.
 fn get_neighbor_fluid(
     pos: BlockPosition,
@@ -95,9 +100,19 @@ fn is_same_fluid(
     fluid_type: FluidType,
     block_map: &HashMap<BlockPosition, &InputBlock>,
 ) -> bool {
-    get_neighbor_fluid(pos, block_map)
+    if get_neighbor_fluid(pos, block_map)
         .map(|f| f.fluid_type == fluid_type)
         .unwrap_or(false)
+    {
+        return true;
+    }
+    // Waterlogged blocks count as water sources for neighbor matching
+    if fluid_type == FluidType::Water {
+        if let Some(b) = block_map.get(&pos) {
+            return is_waterlogged(b);
+        }
+    }
+    false
 }
 
 /// Compute the height at one corner of a fluid block, averaging with neighbors.
@@ -539,5 +554,47 @@ mod tests {
         let lava = FluidState { fluid_type: FluidType::Lava, amount: 8, is_source: true, is_falling: false };
         assert_eq!(lava.still_texture(), "block/lava_still");
         assert_eq!(lava.flow_texture(), "block/lava_flow");
+    }
+
+    #[test]
+    fn test_is_waterlogged_true() {
+        let block = InputBlock::new("minecraft:oak_stairs")
+            .with_property("waterlogged", "true");
+        assert!(is_waterlogged(&block));
+    }
+
+    #[test]
+    fn test_is_waterlogged_false() {
+        let block = InputBlock::new("minecraft:oak_stairs")
+            .with_property("waterlogged", "false");
+        assert!(!is_waterlogged(&block));
+
+        let block = InputBlock::new("minecraft:oak_stairs");
+        assert!(!is_waterlogged(&block));
+    }
+
+    #[test]
+    fn test_waterlogged_neighbor_is_same_fluid() {
+        let waterlogged = InputBlock::new("minecraft:oak_slab")
+            .with_property("waterlogged", "true");
+        let water = water_source();
+        let pos_water = BlockPosition::new(0, 0, 0);
+        let pos_wl = BlockPosition::new(1, 0, 0);
+        let mut map: HashMap<BlockPosition, &InputBlock> = HashMap::new();
+        map.insert(pos_water, &water);
+        map.insert(pos_wl, &waterlogged);
+
+        // Water at pos_water should see waterlogged neighbor as same fluid
+        assert!(is_same_fluid(pos_wl, FluidType::Water, &map));
+    }
+
+    #[test]
+    fn test_non_waterlogged_not_same_fluid() {
+        let slab = InputBlock::new("minecraft:oak_slab");
+        let pos = BlockPosition::new(0, 0, 0);
+        let mut map: HashMap<BlockPosition, &InputBlock> = HashMap::new();
+        map.insert(pos, &slab);
+
+        assert!(!is_same_fluid(pos, FluidType::Water, &map));
     }
 }

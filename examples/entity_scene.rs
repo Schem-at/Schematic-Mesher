@@ -13,9 +13,9 @@ use std::fs;
 use std::path::Path;
 
 fn build_scene(s: &mut Scene) {
-    // Stone floor 24x48
+    // Stone floor 24x80
     for x in 0..24 {
-        for z in 0..48 {
+        for z in 0..80 {
             s.set(x, 0, z, "minecraft:stone");
         }
     }
@@ -237,6 +237,290 @@ fn build_scene(s: &mut Scene) {
     // Lit furnace
     s.set_with(13, 1, 46, "minecraft:furnace", &[("facing", "south"), ("lit", "true")]);
     s.set_with(16, 1, 46, "minecraft:smoker", &[("facing", "south"), ("lit", "true")]);
+
+    // === Section 14 (z=48-49): New Mobs ===
+    s.set_with(1, 1, 48, "entity:wolf", &[("facing", "south")]);
+    s.set_with(4, 1, 48, "entity:cat", &[("facing", "south")]);
+    s.set_with(7, 1, 48, "entity:spider", &[("facing", "south")]);
+    s.set_with(10, 1, 48, "entity:horse", &[("facing", "south")]);
+    s.set_with(13, 1, 48, "entity:enderman", &[("facing", "south")]);
+    s.set_with(16, 1, 48, "entity:slime", &[("facing", "south")]);
+    s.set_with(19, 1, 48, "entity:iron_golem", &[("facing", "south")]);
+    s.set_with(22, 1, 48, "entity:bat", &[("facing", "south")]);
+
+    // === Section 15 (z=50-51): Posed Armor Stands ===
+    // Waving right arm
+    s.set_with(1, 1, 50, "entity:armor_stand", &[
+        ("facing", "south"),
+        ("RightArmPose", "-110,0,0"),
+    ]);
+    // Arms out (T-pose variation)
+    s.set_with(4, 1, 50, "entity:armor_stand", &[
+        ("facing", "south"),
+        ("RightArmPose", "0,0,-90"),
+        ("LeftArmPose", "0,0,90"),
+    ]);
+    // Sitting pose
+    s.set_with(7, 1, 50, "entity:armor_stand", &[
+        ("facing", "south"),
+        ("RightLegPose", "-90,0,0"),
+        ("LeftLegPose", "-90,0,0"),
+    ]);
+    // Dynamic combat pose with armor
+    s.set_with(10, 1, 50, "entity:armor_stand", &[
+        ("facing", "south"),
+        ("RightArmPose", "-60,20,0"),
+        ("LeftArmPose", "-10,0,10"),
+        ("HeadPose", "-15,0,0"),
+        ("helmet", "minecraft:netherite_helmet"),
+        ("chestplate", "minecraft:netherite_chestplate"),
+        ("leggings", "minecraft:netherite_leggings"),
+        ("boots", "minecraft:netherite_boots"),
+    ]);
+
+    // === Section 16 (z=52-53): Signs with Text ===
+    s.set_with(1, 1, 52, "minecraft:oak_sign", &[
+        ("rotation", "0"),
+        ("text1", "Hello"),
+        ("text2", "World"),
+    ]);
+    s.set_with(4, 1, 52, "minecraft:birch_sign", &[
+        ("rotation", "0"),
+        ("text1", "Welcome to"),
+        ("text2", "Minecraft"),
+        ("text3", "Mesher"),
+        ("color", "dark_blue"),
+    ]);
+    // Wall sign with text
+    s.set(7, 2, 53, "minecraft:stone");
+    s.set_with(7, 2, 52, "minecraft:wall_oak_sign", &[
+        ("facing", "south"),
+        ("text1", "Wall Sign"),
+        ("text2", "Line Two"),
+        ("color", "dark_red"),
+    ]);
+
+    // === Section 17 (z=54-55): Baby Mobs ===
+    s.set_with(1, 1, 54, "entity:pig", &[("facing", "south"), ("is_baby", "true")]);
+    s.set_with(4, 1, 54, "entity:cow", &[("facing", "south"), ("is_baby", "true")]);
+    s.set_with(7, 1, 54, "entity:sheep", &[("facing", "south"), ("is_baby", "true")]);
+    s.set_with(10, 1, 54, "entity:chicken", &[("facing", "south"), ("is_baby", "true")]);
+    s.set_with(13, 1, 54, "entity:wolf", &[("facing", "south"), ("is_baby", "true")]);
+    s.set_with(16, 1, 54, "entity:cat", &[("facing", "south"), ("is_baby", "true")]);
+    s.set_with(19, 1, 54, "entity:horse", &[("facing", "south"), ("is_baby", "true")]);
+    s.set_with(22, 1, 54, "entity:zombie", &[("facing", "south"), ("is_baby", "true")]);
+    // Baby sheep with color
+    s.set_with(7, 1, 55, "entity:sheep", &[("facing", "south"), ("is_baby", "true"), ("color", "pink")]);
+    // Adult vs baby comparison
+    s.set_with(1, 1, 55, "entity:pig", &[("facing", "south")]); // adult for comparison
+
+    // === Section 18 (z=57-58): Hanging Signs ===
+    // Ceiling-mounted hanging signs
+    s.set_with(1, 1, 57, "minecraft:oak_hanging_sign", &[("rotation", "0")]);
+    s.set_with(4, 1, 57, "minecraft:birch_hanging_sign", &[("rotation", "4")]);
+    s.set_with(7, 1, 57, "minecraft:cherry_hanging_sign", &[("rotation", "8")]);
+
+    // Wall-mounted hanging signs
+    s.set(1, 2, 59, "minecraft:stone");
+    s.set_with(1, 2, 58, "minecraft:oak_wall_hanging_sign", &[("facing", "south")]);
+    s.set(5, 2, 59, "minecraft:stone");
+    s.set_with(5, 2, 58, "minecraft:birch_wall_hanging_sign", &[("facing", "south")]);
+
+    // Hanging sign with text
+    s.set_with(10, 1, 57, "minecraft:oak_hanging_sign", &[
+        ("rotation", "0"),
+        ("text1", "Hanging"),
+        ("text2", "Sign"),
+    ]);
+    s.set_with(13, 1, 57, "minecraft:cherry_hanging_sign", &[
+        ("rotation", "0"),
+        ("text1", "Cherry"),
+        ("text2", "Wood"),
+        ("color", "dark_red"),
+    ]);
+
+    // Wall hanging sign with text
+    s.set(16, 2, 59, "minecraft:stone");
+    s.set_with(16, 2, 58, "minecraft:spruce_wall_hanging_sign", &[
+        ("facing", "south"),
+        ("text1", "Wall"),
+        ("text2", "Hanging"),
+        ("color", "gold"),
+    ]);
+
+    // === Section 19 (z=61-62): Decorated Pots ===
+    // Plain pot
+    s.set_with(1, 1, 61, "minecraft:decorated_pot", &[("facing", "south")]);
+
+    // Pot with all same sherds
+    s.set_with(4, 1, 61, "minecraft:decorated_pot", &[
+        ("facing", "south"),
+        ("sherds", "angler,angler,angler,angler"),
+    ]);
+
+    // Pot with mixed sherds
+    s.set_with(7, 1, 61, "minecraft:decorated_pot", &[
+        ("facing", "south"),
+        ("sherds", "arms_up,blade,brewer,burn"),
+    ]);
+
+    // Pot with partial sherds (brick = default)
+    s.set_with(10, 1, 61, "minecraft:decorated_pot", &[
+        ("facing", "north"),
+        ("sherds", "brick,archer,brick,heart"),
+    ]);
+
+    // Pots in different facings
+    s.set_with(13, 1, 61, "minecraft:decorated_pot", &[
+        ("facing", "east"),
+        ("sherds", "danger,explorer,friend,howl"),
+    ]);
+    s.set_with(16, 1, 61, "minecraft:decorated_pot", &[
+        ("facing", "west"),
+        ("sherds", "miner,mourner,plenty,prize"),
+    ]);
+
+    // === Section 20 (z=63-65): Lecterns & Enchanting Tables ===
+    // Lectern with book in different facings
+    s.set_with(1, 1, 63, "minecraft:lectern", &[("facing", "south"), ("has_book", "true")]);
+    s.set_with(4, 1, 63, "minecraft:lectern", &[("facing", "north"), ("has_book", "true")]);
+    s.set_with(7, 1, 63, "minecraft:lectern", &[("facing", "east"), ("has_book", "true")]);
+    s.set_with(10, 1, 63, "minecraft:lectern", &[("facing", "west"), ("has_book", "true")]);
+
+    // Lectern without book (no entity geometry, just JSON model)
+    s.set_with(13, 1, 63, "minecraft:lectern", &[("facing", "south"), ("has_book", "false")]);
+
+    // Enchanting tables
+    s.set_with(1, 1, 65, "minecraft:enchanting_table", &[("facing", "south")]);
+    s.set_with(4, 1, 65, "minecraft:enchanting_table", &[("facing", "north")]);
+    s.set_with(7, 1, 65, "minecraft:enchanting_table", &[("facing", "east")]);
+    s.set_with(10, 1, 65, "minecraft:enchanting_table", &[("facing", "west")]);
+
+    // === Section 21 (z=67-69): Cauldron Fluid Levels ===
+    s.set(1, 1, 67, "minecraft:cauldron"); // empty
+    s.set_with(4, 1, 67, "minecraft:water_cauldron", &[("level", "1")]);
+    s.set_with(7, 1, 67, "minecraft:water_cauldron", &[("level", "2")]);
+    s.set_with(10, 1, 67, "minecraft:water_cauldron", &[("level", "3")]);
+    s.set(13, 1, 67, "minecraft:lava_cauldron");
+    s.set_with(16, 1, 67, "minecraft:powder_snow_cauldron", &[("level", "1")]);
+    s.set_with(19, 1, 67, "minecraft:powder_snow_cauldron", &[("level", "2")]);
+    s.set_with(22, 1, 67, "minecraft:powder_snow_cauldron", &[("level", "3")]);
+    s.set(1, 1, 69, "minecraft:powder_snow"); // standalone block
+
+    // === Section 22 (z=71-72): Waterlogged Blocks ===
+    s.set_with(1, 1, 71, "minecraft:oak_stairs", &[
+        ("facing", "south"), ("waterlogged", "true"),
+    ]);
+    s.set_with(4, 1, 71, "minecraft:oak_slab", &[
+        ("type", "bottom"), ("waterlogged", "true"),
+    ]);
+    s.set_with(7, 1, 71, "minecraft:oak_fence", &[("waterlogged", "true")]);
+    s.set_with(10, 1, 71, "minecraft:iron_bars", &[("waterlogged", "true")]);
+    // Adjacent waterlogged blocks (water faces should cull between them)
+    s.set_with(13, 1, 71, "minecraft:oak_slab", &[
+        ("type", "bottom"), ("waterlogged", "true"),
+    ]);
+    s.set_with(14, 1, 71, "minecraft:oak_slab", &[
+        ("type", "bottom"), ("waterlogged", "true"),
+    ]);
+
+    // === Section 23 (z=73-74): Signs with JSON Text + Glow ===
+    // JSON text component sign
+    s.set_with(1, 1, 73, "minecraft:oak_sign", &[
+        ("rotation", "0"),
+        ("text1", r#"{"text":"Hello","color":"red"}"#),
+        ("text2", r#"{"text":"World","color":"blue"}"#),
+    ]);
+    // Array text component
+    s.set_with(4, 1, 73, "minecraft:birch_sign", &[
+        ("rotation", "0"),
+        ("text1", r#"[{"text":"Multi","color":"green"},{"text":"Color","color":"gold"}]"#),
+    ]);
+    // Glowing sign
+    s.set_with(7, 1, 73, "minecraft:oak_sign", &[
+        ("rotation", "0"),
+        ("text1", "Glowing"),
+        ("text2", "Sign"),
+        ("color", "gold"),
+        ("glowing", "true"),
+    ]);
+    // Glowing sign with JSON
+    s.set_with(10, 1, 73, "minecraft:spruce_sign", &[
+        ("rotation", "0"),
+        ("text1", r#"{"text":"Glow","color":"aqua"}"#),
+        ("text2", r#"{"text":"JSON","color":"light_purple"}"#),
+        ("glowing", "true"),
+    ]);
+    // Glowing wall sign
+    s.set(13, 2, 74, "minecraft:stone");
+    s.set_with(13, 2, 73, "minecraft:wall_oak_sign", &[
+        ("facing", "south"),
+        ("text1", "Glow Wall"),
+        ("color", "green"),
+        ("glowing", "true"),
+    ]);
+    // Glowing hanging sign
+    s.set_with(16, 1, 73, "minecraft:oak_hanging_sign", &[
+        ("rotation", "0"),
+        ("text1", "Glow Hang"),
+        ("color", "aqua"),
+        ("glowing", "true"),
+    ]);
+
+    // === Section 24 (z=75-76): Player Heads ===
+    // Steve fallback (no skin property)
+    s.set_with(1, 1, 75, "minecraft:player_head", &[("rotation", "0")]);
+    // Alex fallback via UUID with odd first digit
+    s.set_with(4, 1, 75, "minecraft:player_head", &[
+        ("rotation", "8"),
+        ("uuid", "1a2b3c4d"),
+    ]);
+    // Wall player head
+    s.set(7, 2, 76, "minecraft:stone");
+    s.set_with(7, 2, 75, "minecraft:player_wall_head", &[("facing", "south")]);
+
+    // === Section 25 (z=77-78): Player Entities ===
+    // Steve (default, no skin/UUID)
+    s.set_with(1, 1, 77, "entity:player", &[("facing", "south")]);
+    // Alex via UUID with odd first digit
+    s.set_with(4, 1, 77, "entity:player", &[("facing", "south"), ("uuid", "1a2b3c4d")]);
+    // Alex via explicit slim property
+    s.set_with(7, 1, 77, "entity:player", &[("facing", "south"), ("slim", "true")]);
+    // Player facing east
+    s.set_with(10, 1, 77, "entity:player", &[("facing", "east")]);
+    // Player with pose
+    s.set_with(13, 1, 77, "entity:player", &[
+        ("facing", "south"),
+        ("RightArmPose", "-60,20,0"),
+        ("LeftArmPose", "-10,0,10"),
+        ("HeadPose", "-15,0,0"),
+    ]);
+    // Player with walking pose
+    s.set_with(16, 1, 77, "entity:player", &[
+        ("facing", "south"),
+        ("RightArmPose", "30,0,0"),
+        ("LeftArmPose", "-30,0,0"),
+        ("RightLegPose", "-30,0,0"),
+        ("LeftLegPose", "30,0,0"),
+    ]);
+    // Player with full diamond armor
+    s.set_with(19, 1, 77, "entity:player", &[
+        ("facing", "south"),
+        ("helmet", "diamond"),
+        ("chestplate", "diamond"),
+        ("leggings", "diamond"),
+        ("boots", "diamond"),
+    ]);
+    // Player with mixed armor + pose
+    s.set_with(22, 1, 77, "entity:player", &[
+        ("facing", "south"),
+        ("helmet", "iron"),
+        ("chestplate", "diamond"),
+        ("leggings", "gold"),
+        ("boots", "chainmail"),
+        ("RightArmPose", "45,0,0"),
+        ("LeftArmPose", "-45,0,0"),
+    ]);
 
     // === Reference blocks nearby ===
     s.set(22, 1, 1, "minecraft:oak_planks");

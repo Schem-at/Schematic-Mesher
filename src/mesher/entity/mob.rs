@@ -1,13 +1,22 @@
 use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose, MobType};
 use super::armor_stand;
+use super::bat;
+use super::cat;
 use super::chicken;
 use super::cow;
+use super::enderman;
+use super::horse;
+use super::iron_golem;
 use super::minecart;
 use super::sheep;
+use super::slime;
+use super::spider;
 use super::villager;
+use super::wolf;
+use crate::types::InputBlock;
 
-pub(super) fn build_mob_model(mob_type: MobType) -> EntityModelDef {
-    match mob_type {
+pub(super) fn build_mob_model(mob_type: MobType, block: &InputBlock) -> EntityModelDef {
+    let mut model = match mob_type {
         MobType::Zombie => zombie_model(),
         MobType::Skeleton => skeleton_model(),
         MobType::Creeper => creeper_model(),
@@ -16,18 +25,61 @@ pub(super) fn build_mob_model(mob_type: MobType) -> EntityModelDef {
         MobType::Cow => cow::cow_model(),
         MobType::Sheep => sheep::sheep_model(),
         MobType::Villager => villager::villager_model(),
-        MobType::ArmorStand => armor_stand::armor_stand_model(),
+        MobType::ArmorStand => armor_stand::armor_stand_model(block),
         MobType::Minecart => minecart::minecart_model(),
-        MobType::ItemFrame | MobType::GlowItemFrame | MobType::DroppedItem => {
-            unreachable!("Item frames and dropped items handled in generate_mob_geometry")
+        MobType::Wolf => wolf::wolf_model(),
+        MobType::Cat => cat::cat_model(),
+        MobType::Spider => spider::spider_model(),
+        MobType::Horse => horse::horse_model(),
+        MobType::Enderman => enderman::enderman_model(),
+        MobType::Slime => slime::slime_model(),
+        MobType::IronGolem => iron_golem::iron_golem_model(),
+        MobType::Bat => bat::bat_model(),
+        MobType::ItemFrame | MobType::GlowItemFrame | MobType::DroppedItem | MobType::Player => {
+            unreachable!("Item frames, dropped items, and players handled in generate_mob_geometry/add_mob")
         }
+    };
+
+    // Apply baby scaling if is_baby property is set
+    if block.properties.get("is_baby").map(|v| v == "true").unwrap_or(false)
+        && supports_baby(mob_type)
+    {
+        apply_baby_scaling(&mut model);
+    }
+
+    model
+}
+
+/// Mob types that support baby variants in Minecraft.
+fn supports_baby(mob_type: MobType) -> bool {
+    matches!(
+        mob_type,
+        MobType::Cow
+            | MobType::Pig
+            | MobType::Sheep
+            | MobType::Chicken
+            | MobType::Wolf
+            | MobType::Cat
+            | MobType::Horse
+            | MobType::Villager
+            | MobType::Zombie
+    )
+}
+
+/// Scale a mob model to baby size (0.5x).
+/// Adjusts the root part's scale and Y position so feet stay on the ground.
+fn apply_baby_scaling(model: &mut EntityModelDef) {
+    if let Some(root) = model.parts.first_mut() {
+        root.pose.scale = [0.5, 0.5, 0.5];
+        // Root Y is 24 (1.5 blocks). Baby at 0.5x only needs Y=12 (0.75 blocks)
+        root.pose.position[1] = 12.0;
     }
 }
 
 /// Wrap mob body parts in a root part that converts Java Y-down to Y-up.
 /// RotX(PI) flips Y and Z. Position [8, 24, 8] centers X/Z and translates up
 /// so feet land at ground level (24/16 = 1.5 blocks up).
-fn mob_root(children: Vec<EntityPart>) -> EntityPart {
+pub(super) fn mob_root(children: Vec<EntityPart>) -> EntityPart {
     EntityPart {
         cubes: vec![],
         pose: EntityPartPose {

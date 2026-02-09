@@ -192,6 +192,17 @@ impl<'a> MeshBuilder<'a> {
             }
         }
 
+        // Waterlogged blocks: add water source overlay
+        if liquid::is_waterlogged(block) {
+            let water_state = FluidState {
+                fluid_type: liquid::FluidType::Water,
+                amount: 8,
+                is_source: true,
+                is_falling: false,
+            };
+            self.add_liquid(pos, block, &water_state)?;
+        }
+
         Ok(())
     }
 
@@ -269,6 +280,38 @@ impl<'a> MeshBuilder<'a> {
         // Banner: composite texture before generating geometry
         if let entity::BlockEntityType::Banner { color, is_wall } = entity_type {
             return self.add_banner(pos, block, color, *is_wall);
+        }
+
+        // Sign with text: composite text onto texture
+        if let entity::BlockEntityType::Sign { wood, is_wall } = entity_type {
+            if block.properties.contains_key("text1")
+                || block.properties.contains_key("text2")
+                || block.properties.contains_key("text3")
+                || block.properties.contains_key("text4")
+            {
+                return self.add_sign_with_text(pos, block, *wood, *is_wall);
+            }
+        }
+
+        // Hanging sign with text
+        if let entity::BlockEntityType::HangingSign { wood, is_wall } = entity_type {
+            if block.properties.contains_key("text1")
+                || block.properties.contains_key("text2")
+                || block.properties.contains_key("text3")
+                || block.properties.contains_key("text4")
+            {
+                return self.add_hanging_sign_with_text(pos, block, *wood, *is_wall);
+            }
+        }
+
+        // Player head: custom texture handling with dynamic skin
+        if let entity::BlockEntityType::Skull(entity::SkullType::Player) = entity_type {
+            return self.add_player_head(pos, block);
+        }
+
+        // Decorated pot: custom per-face geometry
+        if matches!(entity_type, entity::BlockEntityType::DecoratedPot) {
+            return self.add_decorated_pot(pos, block);
         }
 
         let (vertices, indices, face_textures) =
@@ -416,7 +459,14 @@ impl<'a> MeshBuilder<'a> {
 
         // Sheep: render wool overlay
         if matches!(mob_type, entity::MobType::Sheep) {
-            let wool_model = crate::mesher::entity::sheep::sheep_wool_model();
+            let mut wool_model = crate::mesher::entity::sheep::sheep_wool_model();
+            // Apply baby scaling to wool overlay too
+            if block.properties.get("is_baby").map(|v| v == "true").unwrap_or(false) {
+                if let Some(root) = wool_model.parts.first_mut() {
+                    root.pose.scale = [0.5, 0.5, 0.5];
+                    root.pose.position[1] = 12.0;
+                }
+            }
             let facing = block.properties.get("facing")
                 .map(|s| s.as_str())
                 .unwrap_or("south");
@@ -454,8 +504,57 @@ impl<'a> MeshBuilder<'a> {
             }
         }
 
-        // Armor stands: render armor overlay if armor properties are set
-        if matches!(mob_type, entity::MobType::ArmorStand) {
+        // Players: dynamic skin texture + direct model generation
+        if matches!(mob_type, entity::MobType::Player) {
+            let tex_key = format!("_player/{}_{}_{}", pos.x, pos.y, pos.z);
+            if !self.dynamic_textures.contains_key(&tex_key) {
+                // Try hex skin property
+                if let Some(skin_hex) = block.properties.get("skin") {
+                    if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+                        self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                    }
+                }
+                // Fallback to Steve/Alex from resource pack
+                if !self.dynamic_textures.contains_key(&tex_key) {
+                    let fallback = entity::skull::player_skin_fallback_path(block);
+                    if let Some(tex) = self.resource_pack.get_texture(fallback) {
+                        self.dynamic_textures.insert(tex_key.clone(), tex.clone());
+                    }
+                }
+            }
+
+            // Build player model with dynamic texture key
+            let model = entity::player::player_model(block, &tex_key);
+
+            let facing = block.properties.get("facing")
+                .map(|s| s.as_str())
+                .unwrap_or("south");
+            let facing_angle = entity::facing_rotation_rad(facing);
+            let facing_mat = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+                * glam::Mat4::from_rotation_y(facing_angle)
+                * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+
+            let mut player_verts = Vec::new();
+            let mut player_indices = Vec::new();
+            let mut player_faces = Vec::new();
+
+            entity::traverse_parts(
+                &model.parts,
+                glam::Mat4::IDENTITY,
+                &facing_mat,
+                &model,
+                &mut player_verts,
+                &mut player_indices,
+                &mut player_faces,
+            );
+
+            if !player_verts.is_empty() {
+                self.add_item_geometry(pos, &player_verts, &player_indices, &player_faces);
+            }
+        }
+
+        // Armor stands and players: render armor overlay if armor properties are set
+        if matches!(mob_type, entity::MobType::ArmorStand | entity::MobType::Player) {
             let facing = block.properties.get("facing")
                 .map(|s| s.as_str())
                 .unwrap_or("south");
@@ -663,6 +762,244 @@ impl<'a> MeshBuilder<'a> {
         }
 
         self.add_item_geometry(pos, &vertices, &indices, &face_textures);
+
+        Ok(())
+    }
+
+    /// Add sign entity with text composited onto the texture.
+    fn add_sign_with_text(
+        &mut self,
+        pos: BlockPosition,
+        block: &InputBlock,
+        wood: entity::SignWood,
+        is_wall: bool,
+    ) -> Result<()> {
+        let base_texture = entity::sign::sign_texture_path(wood);
+        let color = block.properties.get("color")
+            .map(|s| s.as_str())
+            .unwrap_or("black");
+        let glowing = block.properties.get("glowing")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+
+        let lines: Vec<&str> = (1..=4)
+            .filter_map(|i| {
+                block.properties.get(&format!("text{}", i))
+                    .map(|s| s.as_str())
+            })
+            .collect();
+
+        // Generate unique texture key (includes glowing flag)
+        let mut tex_key = format!("_sign/{}_{}_{}", base_texture, color, if glowing { "glow" } else { "normal" });
+        for line in &lines {
+            tex_key.push('_');
+            tex_key.push_str(line);
+        }
+
+        // Composite texture if not cached
+        if !self.dynamic_textures.contains_key(&tex_key) {
+            if let Some(tex) = entity::sign_text::composite_sign_with_text(
+                self.resource_pack, base_texture, &lines, color, glowing,
+            ) {
+                self.dynamic_textures.insert(tex_key.clone(), tex);
+            } else {
+                // Fallback to normal sign rendering (no font available)
+                let (vertices, indices, face_textures) =
+                    entity::generate_entity_geometry(block, &entity::BlockEntityType::Sign { wood, is_wall });
+                if !vertices.is_empty() {
+                    self.add_item_geometry(pos, &vertices, &indices, &face_textures);
+                }
+                return Ok(());
+            }
+        }
+
+        // Build sign model with custom texture (4x upscaled)
+        let model = entity::sign::sign_model_upscaled(&tex_key, is_wall);
+
+        // Compute facing
+        let facing_angle = if !is_wall {
+            entity::standing_rotation_rad(block)
+        } else {
+            entity::facing_rotation_rad(entity::get_facing(block))
+        };
+        let facing_mat = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+            * glam::Mat4::from_rotation_y(facing_angle)
+            * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut face_textures = Vec::new();
+
+        entity::traverse_parts(
+            &model.parts,
+            glam::Mat4::IDENTITY,
+            &facing_mat,
+            &model,
+            &mut vertices,
+            &mut indices,
+            &mut face_textures,
+        );
+
+        if !vertices.is_empty() {
+            self.add_item_geometry(pos, &vertices, &indices, &face_textures);
+        }
+
+        Ok(())
+    }
+
+    /// Add decorated pot with per-face sherd textures.
+    fn add_decorated_pot(
+        &mut self,
+        pos: BlockPosition,
+        block: &InputBlock,
+    ) -> Result<()> {
+        let (vertices, indices, face_textures) =
+            entity::decorated_pot::generate_decorated_pot_geometry(block);
+
+        if vertices.is_empty() {
+            return Ok(());
+        }
+
+        self.add_item_geometry(pos, &vertices, &indices, &face_textures);
+
+        Ok(())
+    }
+
+    /// Add player head entity with skin texture support.
+    fn add_player_head(
+        &mut self,
+        pos: BlockPosition,
+        block: &InputBlock,
+    ) -> Result<()> {
+        let block_id = block.block_id();
+        let is_wall = block_id.contains("wall");
+
+        // Determine texture key
+        let tex_key = format!("_player_head/{}_{}_{}", pos.x, pos.y, pos.z);
+
+        // Try to decode hex skin property, otherwise use fallback
+        if !self.dynamic_textures.contains_key(&tex_key) {
+            if let Some(skin_hex) = block.properties.get("skin") {
+                if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+                    self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                }
+            }
+            // If no skin decoded, load fallback from resource pack
+            if !self.dynamic_textures.contains_key(&tex_key) {
+                let fallback_path = entity::skull::player_skin_fallback_path(block);
+                if let Some(fallback_tex) = self.resource_pack.get_texture(fallback_path) {
+                    self.dynamic_textures.insert(tex_key.clone(), fallback_tex.clone());
+                }
+            }
+        }
+
+        // Build player skull model with the texture key
+        let model = entity::skull::player_skull_model(&tex_key);
+
+        // Compute facing/rotation (same logic as regular skulls)
+        let facing_angle = if is_wall {
+            entity::facing_rotation_rad(entity::get_facing(block))
+        } else {
+            entity::standing_rotation_rad(block)
+        };
+        let facing_mat = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+            * glam::Mat4::from_rotation_y(facing_angle)
+            * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut face_textures = Vec::new();
+
+        entity::traverse_parts(
+            &model.parts,
+            glam::Mat4::IDENTITY,
+            &facing_mat,
+            &model,
+            &mut vertices,
+            &mut indices,
+            &mut face_textures,
+        );
+
+        if !vertices.is_empty() {
+            self.add_item_geometry(pos, &vertices, &indices, &face_textures);
+        }
+
+        Ok(())
+    }
+
+    /// Add hanging sign entity with text composited onto the texture.
+    fn add_hanging_sign_with_text(
+        &mut self,
+        pos: BlockPosition,
+        block: &InputBlock,
+        wood: entity::SignWood,
+        is_wall: bool,
+    ) -> Result<()> {
+        let base_texture = entity::hanging_sign::hanging_sign_texture_path(wood);
+        let color = block.properties.get("color")
+            .map(|s| s.as_str())
+            .unwrap_or("black");
+        let glowing = block.properties.get("glowing")
+            .map(|s| s == "true")
+            .unwrap_or(false);
+
+        let lines: Vec<&str> = (1..=4)
+            .filter_map(|i| {
+                block.properties.get(&format!("text{}", i))
+                    .map(|s| s.as_str())
+            })
+            .collect();
+
+        let mut tex_key = format!("_hanging_sign/{}_{}_{}", base_texture, color, if glowing { "glow" } else { "normal" });
+        for line in &lines {
+            tex_key.push('_');
+            tex_key.push_str(line);
+        }
+
+        if !self.dynamic_textures.contains_key(&tex_key) {
+            if let Some(tex) = entity::sign_text::composite_sign_with_text(
+                self.resource_pack, base_texture, &lines, color, glowing,
+            ) {
+                self.dynamic_textures.insert(tex_key.clone(), tex);
+            } else {
+                // Fallback to normal hanging sign rendering (no font available)
+                let (vertices, indices, face_textures) =
+                    entity::generate_entity_geometry(block, &entity::BlockEntityType::HangingSign { wood, is_wall });
+                if !vertices.is_empty() {
+                    self.add_item_geometry(pos, &vertices, &indices, &face_textures);
+                }
+                return Ok(());
+            }
+        }
+
+        let model = entity::hanging_sign::hanging_sign_model_upscaled(&tex_key, is_wall);
+
+        let facing_angle = if !is_wall {
+            entity::standing_rotation_rad(block)
+        } else {
+            entity::facing_rotation_rad(entity::get_facing(block))
+        };
+        let facing_mat = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+            * glam::Mat4::from_rotation_y(facing_angle)
+            * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut face_textures = Vec::new();
+
+        entity::traverse_parts(
+            &model.parts,
+            glam::Mat4::IDENTITY,
+            &facing_mat,
+            &model,
+            &mut vertices,
+            &mut indices,
+            &mut face_textures,
+        );
+
+        if !vertices.is_empty() {
+            self.add_item_geometry(pos, &vertices, &indices, &face_textures);
+        }
 
         Ok(())
     }
