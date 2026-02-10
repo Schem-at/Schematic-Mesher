@@ -117,8 +117,8 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         let use_u16_indices = vertex_count <= 65535;
 
         // Positions: i16 × 3 (2 bytes each = 6 bytes/vertex)
-        // Align to 2 bytes (i16 alignment)
-        align_buffer(buffer, 2);
+        // Align to 4 bytes (glTF requires 4-byte aligned vertex attributes)
+        align_buffer(buffer, 4);
         let pos_offset = buffer.len();
         let mut pos_min = [i16::MAX; 3];
         let mut pos_max = [i16::MIN; 3];
@@ -132,7 +132,8 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         }
 
         // Normals: i8 × 3 (1 byte each = 3 bytes/vertex)
-        // i8 needs no alignment
+        // Align to 4 bytes (glTF requires 4-byte aligned vertex attributes)
+        align_buffer(buffer, 4);
         let norm_offset = buffer.len();
         for v in &mesh.vertices {
             let q = quantize_normal(v.normal);
@@ -148,7 +149,8 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         }
 
         // Colors: u8 × 4 (1 byte each = 4 bytes/vertex)
-        // u8 needs no alignment
+        // Align to 4 bytes (glTF requires 4-byte aligned vertex attributes)
+        align_buffer(buffer, 4);
         let color_offset = buffer.len();
         for v in &mesh.vertices {
             let q = quantize_color(v.color);
