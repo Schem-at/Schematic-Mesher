@@ -176,9 +176,32 @@ impl ModelFace {
         self.uv.unwrap_or([0.0, 0.0, 16.0, 16.0])
     }
 
+    /// Get UV coordinates, auto-calculating from element bounds when not specified.
+    /// Minecraft auto-generates UVs from element from/to based on face direction.
+    pub fn uv_or_auto(&self, direction: Direction, element_from: &[f32; 3], element_to: &[f32; 3]) -> [f32; 4] {
+        if let Some(uv) = self.uv {
+            return uv;
+        }
+        // Auto-UV mapping per Minecraft spec: project element bounds onto the face plane
+        match direction {
+            Direction::Down  => [element_from[0], 16.0 - element_to[2], element_to[0], 16.0 - element_from[2]],
+            Direction::Up    => [element_from[0], element_from[2], element_to[0], element_to[2]],
+            Direction::North => [16.0 - element_to[0], 16.0 - element_to[1], 16.0 - element_from[0], 16.0 - element_from[1]],
+            Direction::South => [element_from[0], 16.0 - element_to[1], element_to[0], 16.0 - element_from[1]],
+            Direction::West  => [element_from[2], 16.0 - element_to[1], element_to[2], 16.0 - element_from[1]],
+            Direction::East  => [16.0 - element_to[2], 16.0 - element_to[1], 16.0 - element_from[2], 16.0 - element_from[1]],
+        }
+    }
+
     /// Get normalized UV coordinates (0-1 range).
     pub fn normalized_uv(&self) -> [f32; 4] {
         let uv = self.uv_or_default();
+        [uv[0] / 16.0, uv[1] / 16.0, uv[2] / 16.0, uv[3] / 16.0]
+    }
+
+    /// Get normalized UV coordinates (0-1 range), auto-calculating from element bounds if needed.
+    pub fn normalized_uv_auto(&self, direction: Direction, element_from: &[f32; 3], element_to: &[f32; 3]) -> [f32; 4] {
+        let uv = self.uv_or_auto(direction, element_from, element_to);
         [uv[0] / 16.0, uv[1] / 16.0, uv[2] / 16.0, uv[3] / 16.0]
     }
 
@@ -308,5 +331,82 @@ mod tests {
         assert_eq!(model.resolve_texture("#side"), Some("#all")); // Only one level
         assert_eq!(model.resolve_texture("block/dirt"), Some("block/dirt"));
         assert_eq!(model.resolve_texture("#missing"), None);
+    }
+
+    #[test]
+    fn test_auto_uv_full_block() {
+        // Full block element [0,0,0]-[16,16,16]: auto UV should equal full texture
+        let face = ModelFace {
+            uv: None,
+            texture: "#all".to_string(),
+            cullface: None,
+            rotation: 0,
+            tintindex: -1,
+        };
+        let from = [0.0, 0.0, 0.0];
+        let to = [16.0, 16.0, 16.0];
+
+        let up = face.uv_or_auto(Direction::Up, &from, &to);
+        assert_eq!(up, [0.0, 0.0, 16.0, 16.0]);
+
+        let north = face.uv_or_auto(Direction::North, &from, &to);
+        assert_eq!(north, [0.0, 0.0, 16.0, 16.0]);
+    }
+
+    #[test]
+    fn test_auto_uv_thin_slab() {
+        // Bottom slab element [0,0,0]-[16,8,16]: auto UV should use element bounds
+        let face = ModelFace {
+            uv: None,
+            texture: "#side".to_string(),
+            cullface: None,
+            rotation: 0,
+            tintindex: -1,
+        };
+        let from = [0.0, 0.0, 0.0];
+        let to = [16.0, 8.0, 16.0];
+
+        // North face should only show bottom half of texture (y 0-8)
+        let north = face.uv_or_auto(Direction::North, &from, &to);
+        assert_eq!(north, [0.0, 8.0, 16.0, 16.0]); // 16-8=8 to 16-0=16
+
+        // Up face should be full (x and z are 0-16)
+        let up = face.uv_or_auto(Direction::Up, &from, &to);
+        assert_eq!(up, [0.0, 0.0, 16.0, 16.0]);
+    }
+
+    #[test]
+    fn test_auto_uv_composter_layer() {
+        // Composter bottom element [0,0,0]-[16,2,16]
+        let face = ModelFace {
+            uv: None,
+            texture: "#bottom".to_string(),
+            cullface: None,
+            rotation: 0,
+            tintindex: -1,
+        };
+        let from = [0.0, 0.0, 0.0];
+        let to = [16.0, 2.0, 16.0];
+
+        // South face should only use 2 pixels of Y: 16-2=14 to 16-0=16
+        let south = face.uv_or_auto(Direction::South, &from, &to);
+        assert_eq!(south, [0.0, 14.0, 16.0, 16.0]);
+    }
+
+    #[test]
+    fn test_explicit_uv_overrides_auto() {
+        let face = ModelFace {
+            uv: Some([2.0, 4.0, 14.0, 12.0]),
+            texture: "#side".to_string(),
+            cullface: None,
+            rotation: 0,
+            tintindex: -1,
+        };
+        let from = [0.0, 0.0, 0.0];
+        let to = [16.0, 8.0, 16.0];
+
+        // Explicit UV should always be returned regardless of direction or element bounds
+        let uv = face.uv_or_auto(Direction::North, &from, &to);
+        assert_eq!(uv, [2.0, 4.0, 14.0, 12.0]);
     }
 }

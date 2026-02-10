@@ -1178,7 +1178,7 @@ impl<'a> MeshBuilder<'a> {
                 base_color[1] *= light_factor;
                 base_color[2] *= light_factor;
                 // Compute per-vertex AO for this face so it's included in the merge key
-                let ao = if self.config.ambient_occlusion && !is_emissive {
+                let ao = if self.config.ambient_occlusion && !is_emissive && element.shade {
                     self.culler
                         .map(|c| c.calculate_ao(pos, world_direction))
                         .unwrap_or([3, 3, 3, 3])
@@ -1211,8 +1211,8 @@ impl<'a> MeshBuilder<'a> {
             });
 
             // Calculate AO if enabled (use world direction for neighbor checks)
-            // Skip AO for emissive blocks
-            let ao_values = if self.config.ambient_occlusion && !is_emissive {
+            // Skip AO for emissive blocks and elements with shade: false
+            let ao_values = if self.config.ambient_occlusion && !is_emissive && element.shade {
                 self.culler.map(|c| c.calculate_ao(pos, world_direction))
             } else {
                 None
@@ -1254,12 +1254,34 @@ impl<'a> MeshBuilder<'a> {
         ao_values: Option<[u8; 4]>,
         light_factor: f32,
     ) -> Result<()> {
-        let normal = direction.normal();
-        let uv = face.normalized_uv();
+        // Use auto-UV calculation from element bounds when face has no explicit UV
+        let uv = face.normalized_uv_auto(direction, &element.from, &element.to);
 
-        // Get element bounds in normalized space
-        let from = element.normalized_from();
-        let to = element.normalized_to();
+        // Get element bounds in normalized space, normalizing min/max order.
+        // Minecraft allows from > to to create inside-out geometry (e.g., repeater glow).
+        let raw_from = element.normalized_from();
+        let raw_to = element.normalized_to();
+        let from = [
+            raw_from[0].min(raw_to[0]),
+            raw_from[1].min(raw_to[1]),
+            raw_from[2].min(raw_to[2]),
+        ];
+        let to = [
+            raw_from[0].max(raw_to[0]),
+            raw_from[1].max(raw_to[1]),
+            raw_from[2].max(raw_to[2]),
+        ];
+
+        // Detect inverted bounds — flip normal to point inward for inside-out geometry
+        let bounds_inverted = raw_from[0] > raw_to[0]
+            || raw_from[1] > raw_to[1]
+            || raw_from[2] > raw_to[2];
+        let normal = if bounds_inverted {
+            let n = direction.normal();
+            [-n[0], -n[1], -n[2]]
+        } else {
+            direction.normal()
+        };
 
         // Generate the 4 vertices for this face
         let (positions, uvs) = self.generate_face_vertices(direction, from, to, uv, face.rotation);
