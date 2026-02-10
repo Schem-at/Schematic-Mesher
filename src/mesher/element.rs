@@ -1200,6 +1200,15 @@ impl<'a> MeshBuilder<'a> {
                 continue;
             }
 
+            // Detect glow overlay: shade:false, single face, no cullface.
+            // These are decorative halo quads (e.g., repeater/comparator/torch glow).
+            // Render them semi-transparent so they blend softly instead of appearing
+            // as opaque panels (Minecraft uses bloom post-processing for the glow).
+            let is_glow_overlay = !element.shade
+                && element.faces.len() == 1
+                && face.cullface.is_none();
+            let is_transparent = is_transparent || is_glow_overlay;
+
             // Track texture mapping for UV remapping
             let vertex_start = self.mesh.vertex_count() as u32;
             let index_start = self.mesh.indices.len();
@@ -1218,8 +1227,11 @@ impl<'a> MeshBuilder<'a> {
                 None
             };
 
+            // Glow overlays get reduced alpha for soft glow appearance
+            let alpha_override = if is_glow_overlay { Some(0.4_f32) } else { None };
+
             // Generate face geometry (with lighting applied)
-            self.add_face(pos, block, element, *direction, face, transform, ao_values, light_factor)?;
+            self.add_face(pos, block, element, *direction, face, transform, ao_values, light_factor, alpha_override)?;
         }
 
         Ok(())
@@ -1253,29 +1265,19 @@ impl<'a> MeshBuilder<'a> {
         transform: &BlockTransform,
         ao_values: Option<[u8; 4]>,
         light_factor: f32,
+        alpha_override: Option<f32>,
     ) -> Result<()> {
         // Use auto-UV calculation from element bounds when face has no explicit UV
         let uv = face.normalized_uv_auto(direction, &element.from, &element.to);
 
-        // Get element bounds in normalized space, normalizing min/max order.
-        // Minecraft allows from > to to create inside-out geometry (e.g., repeater glow).
-        let raw_from = element.normalized_from();
-        let raw_to = element.normalized_to();
-        let from = [
-            raw_from[0].min(raw_to[0]),
-            raw_from[1].min(raw_to[1]),
-            raw_from[2].min(raw_to[2]),
-        ];
-        let to = [
-            raw_from[0].max(raw_to[0]),
-            raw_from[1].max(raw_to[1]),
-            raw_from[2].max(raw_to[2]),
-        ];
+        // Get element bounds in normalized space.
+        // Use raw coordinates directly — if from > to on any axis, the reversed
+        // vertex positions create reversed winding (inside-out geometry, e.g. glow overlays).
+        let from = element.normalized_from();
+        let to = element.normalized_to();
 
-        // Detect inverted bounds — flip normal to point inward for inside-out geometry
-        let bounds_inverted = raw_from[0] > raw_to[0]
-            || raw_from[1] > raw_to[1]
-            || raw_from[2] > raw_to[2];
+        // For inverted bounds, the cross product of reversed edges flips the normal
+        let bounds_inverted = from[0] > to[0] || from[1] > to[1] || from[2] > to[2];
         let normal = if bounds_inverted {
             let n = direction.normal();
             [-n[0], -n[1], -n[2]]
@@ -1301,7 +1303,10 @@ impl<'a> MeshBuilder<'a> {
         let offset = [pos.x as f32, pos.y as f32, pos.z as f32];
 
         // Get tint color from the tint provider based on block type and tint index
-        let base_color = self.config.tint_provider.get_tint(block, face.tintindex);
+        let mut base_color = self.config.tint_provider.get_tint(block, face.tintindex);
+        if let Some(alpha) = alpha_override {
+            base_color[3] = alpha;
+        }
 
         // Calculate per-vertex colors with AO and lighting
         let colors = if let Some(ao) = ao_values {
