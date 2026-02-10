@@ -221,36 +221,32 @@ impl<'a> StateResolver<'a> {
         }
     }
 
-    /// Check if all user-specified properties match those in the variant key.
-    /// The variant key may have additional properties not specified by the user.
+    /// Check if the variant key's properties are consistent with the user's block properties.
+    /// For each property in the variant key, the user's block must have a matching value.
+    /// User properties not mentioned in the variant key are ignored (e.g., `waterlogged`
+    /// is absent from slab variant keys but present on blocks).
     fn user_properties_match_variant(
         &self,
         variant_key: &str,
         user_properties: &std::collections::HashMap<String, String>,
     ) -> bool {
-        // If user specified no properties, any variant matches
-        if user_properties.is_empty() {
+        if variant_key.is_empty() {
             return true;
         }
 
-        // Parse variant key into a map
-        let mut variant_props = std::collections::HashMap::new();
+        // Parse variant key into pairs and check each against user properties
         for pair in variant_key.split(',') {
-            if let Some((k, v)) = pair.split_once('=') {
-                variant_props.insert(k, v);
-            }
-        }
-
-        // Check that all user-specified properties match
-        for (user_key, user_value) in user_properties {
-            match variant_props.get(user_key.as_str()) {
-                Some(variant_value) => {
-                    if *variant_value != user_value {
-                        return false; // Value mismatch
+            if let Some((variant_prop, variant_value)) = pair.split_once('=') {
+                match user_properties.get(variant_prop) {
+                    Some(user_value) => {
+                        if user_value != variant_value {
+                            return false; // User has this property but with a different value
+                        }
                     }
-                }
-                None => {
-                    return false; // Variant doesn't have this property at all
+                    None => {
+                        // User didn't specify this property — can't confirm match,
+                        // but don't reject (default scoring handles unspecified props)
+                    }
                 }
             }
         }
@@ -400,5 +396,45 @@ mod tests {
 
         assert_eq!(variants.len(), 1);
         assert_eq!(variants[0].model, "block/piston");
+    }
+
+    #[test]
+    fn test_slab_type_with_waterlogged() {
+        let mut pack = ResourcePack::new();
+
+        // Slab blockstate: variant keys only have `type`, not `waterlogged`
+        let slab_json = r#"{
+            "variants": {
+                "type=bottom": { "model": "block/stone_slab" },
+                "type=top": { "model": "block/stone_slab_top" },
+                "type=double": { "model": "block/stone" }
+            }
+        }"#;
+        let slab_def: BlockstateDefinition = serde_json::from_str(slab_json).unwrap();
+        pack.add_blockstate("minecraft", "stone_slab", slab_def);
+
+        let resolver = StateResolver::new(&pack);
+
+        // Block has both type and waterlogged — should match type=top
+        let block = InputBlock::new("minecraft:stone_slab")
+            .with_property("type", "top")
+            .with_property("waterlogged", "false");
+        let variants = resolver.resolve(&block).unwrap();
+        assert_eq!(variants.len(), 1);
+        assert_eq!(variants[0].model, "block/stone_slab_top");
+
+        // type=bottom with waterlogged
+        let block = InputBlock::new("minecraft:stone_slab")
+            .with_property("type", "bottom")
+            .with_property("waterlogged", "false");
+        let variants = resolver.resolve(&block).unwrap();
+        assert_eq!(variants[0].model, "block/stone_slab");
+
+        // type=double with waterlogged
+        let block = InputBlock::new("minecraft:stone_slab")
+            .with_property("type", "double")
+            .with_property("waterlogged", "false");
+        let variants = resolver.resolve(&block).unwrap();
+        assert_eq!(variants[0].model, "block/stone");
     }
 }
