@@ -58,14 +58,14 @@ pub struct MergedQuad {
 impl MergedQuad {
     /// Compute the 4 world-space vertex positions for this merged quad.
     /// Winding order matches `generate_face_vertices` in element.rs.
-    /// Each block is 1 unit; positions are at block boundaries.
+    /// Uses centered convention: block at (x,y,z) occupies [x-0.5, x+0.5].
     pub fn world_positions(&self) -> [[f32; 3]; 4] {
-        let (u_min, v_min) = (self.u_min as f32, self.v_min as f32);
+        let (u_min, v_min) = (self.u_min as f32 - 0.5, self.v_min as f32 - 0.5);
         let (u_max, v_max) = (
-            (self.u_min + self.width) as f32,
-            (self.v_min + self.height) as f32,
+            (self.u_min + self.width) as f32 - 0.5,
+            (self.v_min + self.height) as f32 - 0.5,
         );
-        let layer = self.layer as f32;
+        let layer = self.layer as f32 - 0.5;
 
         // For positive-facing directions, the face is at layer + 1 boundary
         // For negative-facing directions, the face is at layer boundary
@@ -545,11 +545,11 @@ mod tests {
         };
 
         let positions = quad.world_positions();
-        // Face at y=3 (layer+1), spanning x=1..5, z=3..5
-        assert_eq!(positions[0], [1.0, 3.0, 3.0]); // u_min, y, v_min
-        assert_eq!(positions[1], [5.0, 3.0, 3.0]); // u_max, y, v_min
-        assert_eq!(positions[2], [5.0, 3.0, 5.0]); // u_max, y, v_max
-        assert_eq!(positions[3], [1.0, 3.0, 5.0]); // u_min, y, v_max
+        // Face at y=2.5 (layer+0.5 centered), spanning x=0.5..4.5, z=2.5..4.5
+        assert_eq!(positions[0], [0.5, 2.5, 2.5]); // u_min, y, v_min
+        assert_eq!(positions[1], [4.5, 2.5, 2.5]); // u_max, y, v_min
+        assert_eq!(positions[2], [4.5, 2.5, 4.5]); // u_max, y, v_max
+        assert_eq!(positions[3], [0.5, 2.5, 4.5]); // u_min, y, v_max
     }
 
     #[test]
@@ -568,11 +568,11 @@ mod tests {
         };
 
         let positions = quad.world_positions();
-        // Face at z=0, spanning x=0..3, y=0..2
-        assert_eq!(positions[0], [3.0, 2.0, 0.0]); // u_max, v_max, z
-        assert_eq!(positions[1], [0.0, 2.0, 0.0]); // u_min, v_max, z
-        assert_eq!(positions[2], [0.0, 0.0, 0.0]); // u_min, v_min, z
-        assert_eq!(positions[3], [3.0, 0.0, 0.0]); // u_max, v_min, z
+        // Face at z=-0.5 (layer-0.5 centered), spanning x=-0.5..2.5, y=-0.5..1.5
+        assert_eq!(positions[0], [2.5, 1.5, -0.5]); // u_max, v_max, z
+        assert_eq!(positions[1], [-0.5, 1.5, -0.5]); // u_min, v_max, z
+        assert_eq!(positions[2], [-0.5, -0.5, -0.5]); // u_min, v_min, z
+        assert_eq!(positions[3], [2.5, -0.5, -0.5]); // u_max, v_min, z
     }
 
     #[test]
