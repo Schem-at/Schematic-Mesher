@@ -1,6 +1,14 @@
-//! Mesh generation from block models.
+//! Mesh generation from Minecraft block models.
 //!
-//! This module converts resolved block models into triangle meshes.
+//! The [`Mesher`] is the main entry point. It takes a [`ResourcePack`](crate::ResourcePack)
+//! and converts blocks into triangle meshes via:
+//!
+//! - [`mesh()`](Mesher::mesh) — Mesh an entire [`BlockSource`](crate::BlockSource)
+//! - [`mesh_blocks()`](Mesher::mesh_blocks) — Mesh an iterator of `(BlockPosition, &InputBlock)`
+//! - [`mesh_chunks()`](Mesher::mesh_chunks) — Lazy per-chunk iteration via [`ChunkIter`]
+//!
+//! All methods return geometry separated into opaque, cutout, and transparent layers
+//! with a shared texture atlas.
 
 pub mod geometry;
 pub mod element;
@@ -299,12 +307,19 @@ impl Mesher {
         })
     }
 
-    /// Create a lazy chunk iterator that meshes each chunk independently.
+    /// Create a lazy chunk iterator that meshes one cubic chunk at a time.
     ///
-    /// Pre-scans the source to discover all unique chunk coordinates, then yields
-    /// one [`MeshOutput`](crate::mesh_output::MeshOutput) per chunk with `chunk_coord` set.
+    /// Pre-scans the source to discover all unique chunk coordinates (using
+    /// `div_euclid` for correct negative coordinate handling), then yields one
+    /// [`MeshOutput`](crate::mesh_output::MeshOutput) per chunk with `chunk_coord`
+    /// set to `Some((cx, cy, cz))`.
     ///
-    /// `chunk_size` is the side length of each cubic chunk in blocks (e.g., 16).
+    /// Each chunk is meshed independently with its own atlas. If your [`BlockSource`]
+    /// implements [`blocks_in_region()`](BlockSource::blocks_in_region) efficiently
+    /// (e.g., by only reading relevant chunks from disk), this avoids loading the
+    /// entire world into memory.
+    ///
+    /// `chunk_size` is the side length of each cubic chunk in blocks (typically 16).
     pub fn mesh_chunks<'s, S: BlockSource>(
         &'s self,
         source: &'s S,
@@ -383,7 +398,12 @@ impl Mesher {
 /// A lazy iterator that yields one [`MeshOutput`](crate::mesh_output::MeshOutput) per chunk.
 ///
 /// Created by [`Mesher::mesh_chunks`]. Each yielded `MeshOutput` has its
-/// [`chunk_coord`](crate::mesh_output::MeshOutput::chunk_coord) field set to `Some((cx, cy, cz))`.
+/// [`chunk_coord`](crate::mesh_output::MeshOutput::chunk_coord) field set to
+/// `Some((cx, cy, cz))`.
+///
+/// Use [`chunk_count()`](ChunkIter::chunk_count) and
+/// [`chunk_coords()`](ChunkIter::chunk_coords) to inspect the work ahead without
+/// consuming the iterator (useful for progress bars).
 pub struct ChunkIter<'s, S: BlockSource> {
     mesher: &'s Mesher,
     source: &'s S,

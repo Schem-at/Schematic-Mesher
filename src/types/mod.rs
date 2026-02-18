@@ -114,22 +114,32 @@ impl InputBlock {
     }
 }
 
-/// Trait for block data sources (allows integration with Nucleation).
+/// Trait for block data sources.
+///
+/// Implement this to connect your block storage (e.g., Nucleation, a custom
+/// schematic loader, or an in-memory `HashMap`) to the mesher. Used by
+/// [`Mesher::mesh()`](crate::Mesher::mesh) and
+/// [`Mesher::mesh_chunks()`](crate::Mesher::mesh_chunks).
+///
+/// The mesher reads blocks via [`iter_blocks()`](BlockSource::iter_blocks) for
+/// single-shot meshing and [`blocks_in_region()`](BlockSource::blocks_in_region)
+/// for chunk iteration. Override `blocks_in_region` if your storage can
+/// efficiently query spatial subsets (e.g., by chunk file).
 pub trait BlockSource {
-    /// Get the block at a position.
+    /// Get the block at a specific position, or `None` if empty/air.
     fn get_block(&self, pos: BlockPosition) -> Option<&InputBlock>;
 
-    /// Iterate over all non-air blocks.
+    /// Iterate over all non-air blocks in the source.
     fn iter_blocks(&self) -> Box<dyn Iterator<Item = (BlockPosition, &InputBlock)> + '_>;
 
-    /// Get the bounding box of all blocks.
+    /// Get the axis-aligned bounding box enclosing all blocks.
     fn bounds(&self) -> BoundingBox;
 
     /// Iterate over blocks within a spatial region.
     ///
-    /// The default implementation filters [`iter_blocks()`](BlockSource::iter_blocks).
-    /// A smart source can override this to avoid loading blocks outside the region
-    /// (e.g., by only reading the relevant chunk from disk).
+    /// The default implementation filters [`iter_blocks()`](BlockSource::iter_blocks),
+    /// which scans every block. Override this for efficient spatial queries (e.g.,
+    /// only reading the relevant chunk from disk).
     fn blocks_in_region(
         &self,
         bounds: BoundingBox,

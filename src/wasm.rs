@@ -1,6 +1,25 @@
-//! WASM bindings for schematic-mesher.
+//! WebAssembly bindings for schematic-mesher.
 //!
-//! This module provides JavaScript-friendly APIs for use in the browser.
+//! This module exposes the mesher to JavaScript via `wasm-bindgen`. It provides:
+//!
+//! - **[`ResourcePackHandle`]** — Load and inspect a resource pack from a ZIP `Uint8Array`.
+//! - **[`MesherOptions`]** — Configure face culling, AO, atlas size, and biome tinting.
+//! - **[`mesh_block()`]** / **[`mesh_blocks_json()`]** — One-shot meshing returning GLB bytes.
+//! - **[`MeshOutputWrapper`]** — Zero-copy per-layer typed array access (`Float32Array` /
+//!   `Uint32Array`) for direct WebGL/WebGPU upload.
+//! - **[`mesh_chunks_json()`]** / **[`ChunkMeshIteratorWrapper`]** — Lazy chunk-by-chunk
+//!   meshing for large worlds.
+//!
+//! ## Usage from JavaScript
+//!
+//! ```js
+//! import init, { ResourcePackHandle, mesh_block } from './schematic_mesher.js';
+//!
+//! await init();
+//! const pack = new ResourcePackHandle(zipBytes);
+//! const result = mesh_block(pack, "stone");
+//! const glb = result.glb_data; // Uint8Array
+//! ```
 
 use wasm_bindgen::prelude::*;
 
@@ -317,10 +336,33 @@ fn parse_blocks_json(json: &str) -> Result<(Vec<(crate::BlockPosition, crate::In
 // ---------------------------------------------------------------------------
 
 /// WASM wrapper around [`MeshOutput`](crate::mesh_output::MeshOutput) providing
-/// zero-copy typed array access to each layer's vertex data.
+/// zero-copy typed array views into each transparency layer's vertex data.
 ///
-/// All typed arrays share the WASM linear memory buffer and are transferable
-/// across the JS worker boundary via `.buffer`.
+/// Each accessor (e.g., `opaque_positions()`) returns a typed array view directly
+/// into WASM linear memory — no copies. These views are valid until the
+/// `MeshOutputWrapper` is dropped or the WASM memory grows.
+///
+/// ## Per-Layer Accessors
+///
+/// Each of the three layers (opaque, cutout, transparent) exposes:
+/// - `{layer}_positions()` → `Float32Array` (3 floats/vertex)
+/// - `{layer}_normals()` → `Float32Array` (3 floats/vertex)
+/// - `{layer}_uvs()` → `Float32Array` (2 floats/vertex)
+/// - `{layer}_colors()` → `Float32Array` (4 floats/vertex, RGBA)
+/// - `{layer}_indices()` → `Uint32Array`
+/// - `{layer}_vertex_count()` → `usize`
+/// - `{layer}_triangle_count()` → `usize`
+/// - `{layer}_is_empty()` → `bool`
+///
+/// ## Atlas
+///
+/// - `atlas_rgba()` → `Uint8Array` (RGBA pixels)
+/// - `atlas_width()` / `atlas_height()` → `u32`
+///
+/// ## Export
+///
+/// - `to_glb()` → `Uint8Array` (GLB binary)
+/// - `to_usdz()` → `Uint8Array` (USDZ archive)
 #[wasm_bindgen]
 pub struct MeshOutputWrapper {
     inner: crate::mesh_output::MeshOutput,
@@ -566,8 +608,22 @@ impl MeshOutputWrapper {
 // Chunk mesh iterator wrapper
 // ---------------------------------------------------------------------------
 
-/// WASM wrapper for lazy chunk iteration. Call `advance()` to step to the next
-/// chunk, then `current()` to get the mesh output for that chunk.
+/// WASM wrapper for lazy chunk iteration.
+///
+/// Created by [`mesh_chunks_json()`]. Call `advance()` to step to the next chunk,
+/// then `current()` to get the [`MeshOutputWrapper`] for that chunk.
+///
+/// ```js
+/// const iter = mesh_chunks_json(pack, json, null, 16);
+/// while (iter.advance()) {
+///     const coord = iter.current_coord(); // [cx, cy, cz]
+///     const mesh = iter.current();        // MeshOutputWrapper
+///     // Upload mesh.opaque_positions(), etc. to GPU
+/// }
+/// ```
+///
+/// `current()` transfers ownership of the chunk mesh — calling it twice without
+/// `advance()` returns an empty mesh the second time.
 #[wasm_bindgen]
 pub struct ChunkMeshIteratorWrapper {
     results: Vec<crate::mesh_output::MeshOutput>,

@@ -1,8 +1,37 @@
-//! Canonical mesh output types.
+//! Canonical mesh output types for renderer-agnostic mesh data.
 //!
-//! [`MeshOutput`] and [`MeshLayer`] are the primary public types for renderer-agnostic
-//! mesh data. Each layer contains interleaved vertex attributes (positions, normals, UVs,
-//! colors) and triangle indices, with zero-copy byte accessors for GPU upload.
+//! [`MeshOutput`] and [`MeshLayer`] are the primary public types for consuming mesh
+//! data from the mesher. They replace the internal [`MesherOutput`](crate::mesher::MesherOutput)
+//! for most use cases.
+//!
+//! ## Architecture
+//!
+//! [`MeshOutput`] contains three [`MeshLayer`]s — one per transparency class (opaque,
+//! cutout, transparent) — plus the shared texture atlas, animation metadata, and spatial
+//! bounds. Each layer stores vertex attributes in structure-of-arrays layout:
+//!
+//! | Attribute | Type | Stride | Accessor |
+//! |-----------|------|--------|----------|
+//! | Position  | `[f32; 3]` | 12 bytes | [`positions_bytes()`](MeshLayer::positions_bytes) |
+//! | Normal    | `[f32; 3]` | 12 bytes | [`normals_bytes()`](MeshLayer::normals_bytes) |
+//! | UV        | `[f32; 2]` | 8 bytes  | [`uvs_bytes()`](MeshLayer::uvs_bytes) |
+//! | Color     | `[f32; 4]` | 16 bytes | [`colors_bytes()`](MeshLayer::colors_bytes) |
+//! | Index     | `u32`      | 4 bytes  | [`indices_bytes()`](MeshLayer::indices_bytes) |
+//!
+//! The `_bytes()` methods return `&[u8]` slices over the existing memory — zero allocation,
+//! zero copy — suitable for direct upload to GPU vertex/index buffers.
+//!
+//! ## Conversion
+//!
+//! Convert from the internal output type via [`From`]:
+//!
+//! ```ignore
+//! let mesh_output = MeshOutput::from(&mesher_output);
+//! ```
+//!
+//! This merges greedy material meshes into the opaque/transparent layers. To convert
+//! back (e.g., for use with standalone export functions), use [`to_glb()`](MeshOutput::to_glb),
+//! [`to_usdz()`](MeshOutput::to_usdz), or [`to_obj()`](MeshOutput::to_obj).
 
 use crate::atlas::TextureAtlas;
 use crate::error::Result;
