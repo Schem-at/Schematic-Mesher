@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "nucleation"
-version = "0.1.151"
+version = "0.1.157"
 dependencies = [
  "blockpedia",
  "bytemuck",
@@ -771,6 +771,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "tracing-subscriber",
+ "zip",
 ]
 
 [[package]]
