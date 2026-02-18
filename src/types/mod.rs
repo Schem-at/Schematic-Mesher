@@ -124,4 +124,26 @@ pub trait BlockSource {
 
     /// Get the bounding box of all blocks.
     fn bounds(&self) -> BoundingBox;
+
+    /// Iterate over blocks within a spatial region.
+    ///
+    /// The default implementation filters [`iter_blocks()`](BlockSource::iter_blocks).
+    /// A smart source can override this to avoid loading blocks outside the region
+    /// (e.g., by only reading the relevant chunk from disk).
+    fn blocks_in_region(
+        &self,
+        bounds: BoundingBox,
+    ) -> Box<dyn Iterator<Item = (BlockPosition, &InputBlock)> + '_> {
+        Box::new(self.iter_blocks().filter(move |(pos, _)| {
+            let x = pos.x as f32;
+            let y = pos.y as f32;
+            let z = pos.z as f32;
+            x >= bounds.min[0]
+                && x < bounds.max[0]
+                && y >= bounds.min[1]
+                && y < bounds.max[1]
+                && z >= bounds.min[2]
+                && z < bounds.max[2]
+        }))
+    }
 }

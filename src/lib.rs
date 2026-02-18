@@ -51,17 +51,23 @@ pub mod resolver;
 pub mod mesher;
 pub mod atlas;
 pub mod export;
+pub mod mesh_output;
 
 // Re-export main types for convenience
 pub use error::{MesherError, Result};
 pub use types::{Direction, Axis, BlockPosition, BoundingBox, InputBlock, BlockSource};
 pub use resource_pack::{ResourcePack, BlockModel, ModelElement, BlockstateDefinition};
 pub use mesher::{Mesher, MesherConfig, MesherOutput, Mesh, Vertex, TintColors, TintProvider};
+pub use mesher::ChunkIter;
 pub use atlas::TextureAtlas;
 pub use export::gltf::export_glb;
 pub use export::obj::{export_obj, ObjExport};
 pub use export::raw::{export_raw, RawMeshData};
 pub use export::usd::{export_usda, export_usdz, UsdaExport, UsdTexture};
+
+// New canonical output types
+pub use mesh_output::{MeshOutput, MeshLayer};
+pub use export::{MeshExporter, GlbExporter, ObjExporter, UsdzExporter};
 
 /// Load a resource pack from a file path (ZIP or directory).
 pub fn load_resource_pack<P: AsRef<std::path::Path>>(path: P) -> Result<ResourcePack> {

@@ -39,7 +39,7 @@ impl AtlasRegion {
 }
 
 /// A built texture atlas.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TextureAtlas {
     /// Width of the atlas in pixels.
     pub width: u32,

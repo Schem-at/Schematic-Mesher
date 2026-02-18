@@ -299,6 +299,38 @@ impl Mesher {
         })
     }
 
+    /// Create a lazy chunk iterator that meshes each chunk independently.
+    ///
+    /// Pre-scans the source to discover all unique chunk coordinates, then yields
+    /// one [`MeshOutput`](crate::mesh_output::MeshOutput) per chunk with `chunk_coord` set.
+    ///
+    /// `chunk_size` is the side length of each cubic chunk in blocks (e.g., 16).
+    pub fn mesh_chunks<'s, S: BlockSource>(
+        &'s self,
+        source: &'s S,
+        chunk_size: i32,
+    ) -> ChunkIter<'s, S> {
+        // Pre-scan to collect all unique chunk coords
+        let mut chunk_coords: Vec<(i32, i32, i32)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (pos, _) in source.iter_blocks() {
+            let cx = pos.x.div_euclid(chunk_size);
+            let cy = pos.y.div_euclid(chunk_size);
+            let cz = pos.z.div_euclid(chunk_size);
+            if seen.insert((cx, cy, cz)) {
+                chunk_coords.push((cx, cy, cz));
+            }
+        }
+
+        ChunkIter {
+            mesher: self,
+            source,
+            chunk_size,
+            chunk_coords,
+            index: 0,
+        }
+    }
+
     /// Collect animation metadata for textures that are animated and present in the atlas.
     fn collect_animated_textures(
         resource_pack: &ResourcePack,
@@ -345,5 +377,175 @@ impl Mesher {
         }
 
         result
+    }
+}
+
+/// A lazy iterator that yields one [`MeshOutput`](crate::mesh_output::MeshOutput) per chunk.
+///
+/// Created by [`Mesher::mesh_chunks`]. Each yielded `MeshOutput` has its
+/// [`chunk_coord`](crate::mesh_output::MeshOutput::chunk_coord) field set to `Some((cx, cy, cz))`.
+pub struct ChunkIter<'s, S: BlockSource> {
+    mesher: &'s Mesher,
+    source: &'s S,
+    chunk_size: i32,
+    chunk_coords: Vec<(i32, i32, i32)>,
+    index: usize,
+}
+
+impl<'s, S: BlockSource> ChunkIter<'s, S> {
+    /// Total number of chunks discovered during pre-scan.
+    pub fn chunk_count(&self) -> usize {
+        self.chunk_coords.len()
+    }
+
+    /// The chunk coordinates that will be iterated, in discovery order.
+    pub fn chunk_coords(&self) -> &[(i32, i32, i32)] {
+        &self.chunk_coords
+    }
+}
+
+impl<'s, S: BlockSource> Iterator for ChunkIter<'s, S> {
+    type Item = Result<crate::mesh_output::MeshOutput>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index >= self.chunk_coords.len() {
+            return None;
+        }
+
+        let (cx, cy, cz) = self.chunk_coords[self.index];
+        self.index += 1;
+
+        let cs = self.chunk_size;
+        let chunk_bounds = BoundingBox::new(
+            [(cx * cs) as f32, (cy * cs) as f32, (cz * cs) as f32],
+            [((cx + 1) * cs) as f32, ((cy + 1) * cs) as f32, ((cz + 1) * cs) as f32],
+        );
+
+        // Get blocks in this chunk region
+        let blocks: Vec<_> = self.source.blocks_in_region(chunk_bounds).collect();
+        if blocks.is_empty() {
+            // Return empty MeshOutput for this chunk
+            return Some(Ok(crate::mesh_output::MeshOutput {
+                opaque: crate::mesh_output::MeshLayer::new(),
+                cutout: crate::mesh_output::MeshLayer::new(),
+                transparent: crate::mesh_output::MeshLayer::new(),
+                atlas: crate::atlas::TextureAtlas::empty(),
+                animated_textures: Vec::new(),
+                bounds: chunk_bounds,
+                chunk_coord: Some((cx, cy, cz)),
+                lod_level: 0,
+            }));
+        }
+
+        // Mesh this chunk
+        let result = self.mesher.mesh_blocks(
+            blocks.into_iter(),
+            chunk_bounds,
+        );
+
+        Some(result.map(|mesher_output| {
+            let mut mesh_output = crate::mesh_output::MeshOutput::from(&mesher_output);
+            mesh_output.chunk_coord = Some((cx, cy, cz));
+            mesh_output
+        }))
+    }
+}
+
+#[cfg(test)]
+mod chunk_tests {
+    use super::*;
+
+    /// Simple in-memory block source for testing.
+    struct TestBlockSource {
+        blocks: Vec<(BlockPosition, InputBlock)>,
+        bounds: BoundingBox,
+    }
+
+    impl BlockSource for TestBlockSource {
+        fn get_block(&self, pos: BlockPosition) -> Option<&InputBlock> {
+            self.blocks.iter().find(|(p, _)| *p == pos).map(|(_, b)| b)
+        }
+
+        fn iter_blocks(&self) -> Box<dyn Iterator<Item = (BlockPosition, &InputBlock)> + '_> {
+            Box::new(self.blocks.iter().map(|(p, b)| (*p, b)))
+        }
+
+        fn bounds(&self) -> BoundingBox {
+            self.bounds
+        }
+    }
+
+    #[test]
+    fn test_chunk_iter_yields_correct_coords() {
+        // Place blocks in 3 different chunks (chunk_size=4):
+        // block at (0,0,0) => chunk (0,0,0)
+        // block at (4,0,0) => chunk (1,0,0)
+        // block at (0,4,0) => chunk (0,1,0)
+        let blocks = vec![
+            (BlockPosition::new(0, 0, 0), InputBlock::new("minecraft:stone")),
+            (BlockPosition::new(4, 0, 0), InputBlock::new("minecraft:stone")),
+            (BlockPosition::new(0, 4, 0), InputBlock::new("minecraft:stone")),
+        ];
+        let source = TestBlockSource {
+            bounds: BoundingBox::new([0.0, 0.0, 0.0], [5.0, 5.0, 1.0]),
+            blocks,
+        };
+
+        // We need a resource pack to create a Mesher, but we can test ChunkIter
+        // construction and coordinate discovery without actually meshing.
+        // Use mesh_chunks to create the iterator and check chunk_count/coords.
+        let pack = crate::ResourcePack::new();
+        let mesher = Mesher::new(pack);
+        let iter = mesher.mesh_chunks(&source, 4);
+
+        assert_eq!(iter.chunk_count(), 3);
+
+        let mut coords: Vec<_> = iter.chunk_coords().to_vec();
+        coords.sort();
+        assert_eq!(coords, vec![(0, 0, 0), (0, 1, 0), (1, 0, 0)]);
+    }
+
+    #[test]
+    fn test_chunk_iter_single_chunk() {
+        // All blocks in same chunk
+        let blocks = vec![
+            (BlockPosition::new(0, 0, 0), InputBlock::new("minecraft:stone")),
+            (BlockPosition::new(1, 0, 0), InputBlock::new("minecraft:stone")),
+            (BlockPosition::new(0, 1, 0), InputBlock::new("minecraft:stone")),
+        ];
+        let source = TestBlockSource {
+            bounds: BoundingBox::new([0.0, 0.0, 0.0], [2.0, 2.0, 1.0]),
+            blocks,
+        };
+
+        let pack = crate::ResourcePack::new();
+        let mesher = Mesher::new(pack);
+        let iter = mesher.mesh_chunks(&source, 16);
+
+        assert_eq!(iter.chunk_count(), 1);
+        assert_eq!(iter.chunk_coords(), &[(0, 0, 0)]);
+    }
+
+    #[test]
+    fn test_chunk_iter_negative_coords() {
+        // Blocks in negative coordinate space
+        let blocks = vec![
+            (BlockPosition::new(-1, 0, 0), InputBlock::new("minecraft:stone")),
+            (BlockPosition::new(0, 0, 0), InputBlock::new("minecraft:stone")),
+        ];
+        let source = TestBlockSource {
+            bounds: BoundingBox::new([-1.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            blocks,
+        };
+
+        let pack = crate::ResourcePack::new();
+        let mesher = Mesher::new(pack);
+        let iter = mesher.mesh_chunks(&source, 4);
+
+        assert_eq!(iter.chunk_count(), 2);
+        let mut coords: Vec<_> = iter.chunk_coords().to_vec();
+        coords.sort();
+        // -1 div_euclid 4 = -1, 0 div_euclid 4 = 0
+        assert_eq!(coords, vec![(-1, 0, 0), (0, 0, 0)]);
     }
 }
