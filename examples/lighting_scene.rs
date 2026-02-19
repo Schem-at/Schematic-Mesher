@@ -79,6 +79,7 @@ fn config() -> MesherConfig {
         enable_block_light: true,
         enable_sky_light: true,
         sky_light_level: 15,
+        pre_built_atlas: None,
     }
 }
 

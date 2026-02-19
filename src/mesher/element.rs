@@ -132,6 +132,12 @@ impl<'a> MeshBuilder<'a> {
         }
     }
 
+    /// Returns the set of texture paths collected during face processing.
+    /// Useful for discovering all textures needed before building a global atlas.
+    pub fn texture_refs(&self) -> &HashSet<String> {
+        &self.texture_refs
+    }
+
     /// Add a block to the mesh.
     pub fn add_block(
         &mut self,
@@ -1617,26 +1623,63 @@ impl<'a> MeshBuilder<'a> {
     /// Render order: opaque first, then cutout (alpha-tested), then transparent (alpha-blended).
     /// Greedy materials have their own textures with REPEAT wrapping for tiling.
     /// Animated exports contain sprite sheets from dynamic textures (particles, etc.).
-    pub fn build(mut self) -> Result<(Mesh, Mesh, Mesh, TextureAtlas, Vec<GreedyMaterial>, Vec<super::AnimatedTextureExport>)> {
+    ///
+    /// If `pre_built_atlas` is `Some`, it is used directly instead of building a new atlas.
+    /// Dynamic textures (banners, signs, skins) that are NOT in the pre-built atlas will be
+    /// added to it via a supplemental atlas build pass.
+    pub fn build(mut self, pre_built_atlas: Option<TextureAtlas>) -> Result<(Mesh, Mesh, Mesh, TextureAtlas, Vec<GreedyMaterial>, Vec<super::AnimatedTextureExport>)> {
         // Emit greedy-merged quads into the mesh before atlas building
         self.emit_greedy_quads();
 
-        // Build texture atlas (only for non-greedy faces)
-        let mut atlas_builder = AtlasBuilder::new(
-            self.config.atlas_max_size,
-            self.config.atlas_padding,
-        );
-
-        for texture_ref in &self.texture_refs {
-            // Check dynamic textures first, then resource pack
-            if let Some(texture) = self.dynamic_textures.get(texture_ref) {
-                atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
-            } else if let Some(texture) = self.resource_pack.get_texture(texture_ref) {
-                atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
+        let atlas = if let Some(mut atlas) = pre_built_atlas {
+            // Use pre-built atlas. Any dynamic textures not already in it need to be added.
+            let mut missing_textures = Vec::new();
+            for texture_ref in &self.texture_refs {
+                if !atlas.contains(texture_ref) {
+                    if let Some(texture) = self.dynamic_textures.get(texture_ref) {
+                        missing_textures.push((texture_ref.clone(), texture.first_frame()));
+                    } else if let Some(texture) = self.resource_pack.get_texture(texture_ref) {
+                        missing_textures.push((texture_ref.clone(), texture.first_frame()));
+                    }
+                }
             }
-        }
+            if !missing_textures.is_empty() {
+                // Rebuild atlas with both pre-built and missing textures
+                let mut atlas_builder = AtlasBuilder::new(
+                    self.config.atlas_max_size,
+                    self.config.atlas_padding,
+                );
+                // Re-add all existing textures from the pre-built atlas
+                for texture_ref in atlas.regions.keys() {
+                    if let Some(texture) = self.resource_pack.get_texture(texture_ref) {
+                        atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
+                    }
+                }
+                // Add dynamic/missing textures
+                for (path, tex) in missing_textures {
+                    atlas_builder.add_texture(path, tex);
+                }
+                atlas = atlas_builder.build()?;
+            }
+            atlas
+        } else {
+            // Build texture atlas from scratch (only for non-greedy faces)
+            let mut atlas_builder = AtlasBuilder::new(
+                self.config.atlas_max_size,
+                self.config.atlas_padding,
+            );
 
-        let atlas = atlas_builder.build()?;
+            for texture_ref in &self.texture_refs {
+                // Check dynamic textures first, then resource pack
+                if let Some(texture) = self.dynamic_textures.get(texture_ref) {
+                    atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
+                } else if let Some(texture) = self.resource_pack.get_texture(texture_ref) {
+                    atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
+                }
+            }
+
+            atlas_builder.build()?
+        };
 
         // Remap UVs to atlas coordinates (only non-greedy faces)
         for face_mapping in &self.face_textures {

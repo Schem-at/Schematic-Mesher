@@ -161,7 +161,7 @@ pub mod mesh_output;
 pub use error::{MesherError, Result};
 pub use types::{Direction, Axis, BlockPosition, BoundingBox, InputBlock, BlockSource};
 pub use resource_pack::{ResourcePack, BlockModel, ModelElement, BlockstateDefinition};
-pub use atlas::TextureAtlas;
+pub use atlas::{AtlasBuilder, AtlasRegion, TextureAtlas};
 
 // --- Mesher ---
 pub use mesher::{Mesher, MesherConfig, MesherOutput, Mesh, Vertex, TintColors, TintProvider};

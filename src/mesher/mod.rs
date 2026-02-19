@@ -57,6 +57,9 @@ pub struct MesherConfig {
     pub sky_light_level: u8,
     /// Enable static particle marker quads (torches, campfires, candles, etc.).
     pub enable_particles: bool,
+    /// If set, skip per-chunk atlas building and use this pre-built atlas instead.
+    /// UVs will be remapped to this atlas's regions. Used for global atlas workflows.
+    pub pre_built_atlas: Option<TextureAtlas>,
 }
 
 impl Default for MesherConfig {
@@ -75,6 +78,7 @@ impl Default for MesherConfig {
             enable_sky_light: false,
             sky_light_level: 15,
             enable_particles: true,
+            pre_built_atlas: None,
         }
     }
 }
@@ -290,7 +294,7 @@ impl Mesher {
         }
 
         // Build the final meshes and atlas
-        let (opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials, dynamic_animated) = mesh_builder.build()?;
+        let (opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials, dynamic_animated) = mesh_builder.build(self.config.pre_built_atlas.clone())?;
 
         // Collect animated texture metadata for viewer-side frame cycling
         let mut animated_textures = Self::collect_animated_textures(&self.resource_pack, &atlas);
@@ -344,6 +348,46 @@ impl Mesher {
             chunk_coords,
             index: 0,
         }
+    }
+
+    /// Discover all texture paths needed to mesh a block source, without building geometry.
+    ///
+    /// Runs the full face processing pipeline to collect texture references, but the
+    /// resulting mesh is discarded. Use this to pre-scan blocks for a global atlas.
+    pub fn discover_textures<S: BlockSource>(&self, source: &S) -> std::collections::HashSet<String> {
+        let blocks: Vec<_> = source.iter_blocks().collect();
+        let block_map: std::collections::HashMap<BlockPosition, &InputBlock> =
+            blocks.iter().map(|(pos, block)| (*pos, *block)).collect();
+        let culler = if self.config.cull_hidden_faces {
+            Some(face_culler::FaceCuller::new(&self.resource_pack, &blocks))
+        } else {
+            None
+        };
+        let light_map: Option<lighting::LightMap> = None; // Skip lighting for discovery
+
+        let mut mesh_builder = element::MeshBuilder::new(
+            &self.resource_pack,
+            &self.config,
+            culler.as_ref(),
+            Some(&block_map),
+            light_map.as_ref(),
+        );
+
+        for (pos, block) in &blocks {
+            if !self.config.include_air && block.is_air() {
+                continue;
+            }
+            if self.config.cull_occluded_blocks {
+                if let Some(ref culler) = culler {
+                    if culler.is_fully_occluded(*pos) {
+                        continue;
+                    }
+                }
+            }
+            let _ = mesh_builder.add_block(*pos, block);
+        }
+
+        mesh_builder.texture_refs().clone()
     }
 
     /// Collect animation metadata for textures that are animated and present in the atlas.
