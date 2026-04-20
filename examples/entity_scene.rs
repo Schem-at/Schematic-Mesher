@@ -553,7 +553,7 @@ fn build_scene(s: &mut Scene) {
         ("facing", "south"), ("skin_base64", SLOIMAY_SKIN),
     ]);
     s.set_with(13, 1, 83, "entity:player", &[
-        ("facing", "south"), ("skin_base64", PURPLERS_SKIN),
+        ("facing", "south"), ("skin_base64", PURPLERS_SKIN), ("slim", "true"),
     ]);
     s.set_with(16, 1, 83, "entity:player", &[
         ("facing", "south"), ("skin_base64", NANO_SKIN),

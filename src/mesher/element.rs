@@ -102,6 +102,36 @@ pub struct MeshBuilder<'a> {
     dynamic_textures: HashMap<String, TextureData>,
 }
 
+/// Synthetic atlas key for the fallback "unknown texture" tile. Added to every
+/// atlas so faces whose declared texture couldn't be resolved have a valid
+/// region to sample, instead of leaking into full-atlas [0,1] UVs.
+const MISSING_TEXTURE_KEY: &str = "__missing__";
+
+/// Build a 16x16 magenta/black checkerboard texture, MC-style, to mark faces
+/// whose texture couldn't be found in the resource pack.
+fn make_missing_texture() -> TextureData {
+    const SIZE: u32 = 16;
+    let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let magenta = (x / 8 + y / 8) % 2 == 0;
+            if magenta {
+                pixels.extend_from_slice(&[0xF8, 0x00, 0xF8, 0xFF]);
+            } else {
+                pixels.extend_from_slice(&[0x00, 0x00, 0x00, 0xFF]);
+            }
+        }
+    }
+    TextureData {
+        width: SIZE,
+        height: SIZE,
+        pixels,
+        is_animated: false,
+        frame_count: 1,
+        animation: None,
+    }
+}
+
 impl<'a> MeshBuilder<'a> {
     pub fn new(
         resource_pack: &'a ResourcePack,
@@ -1989,18 +2019,41 @@ impl<'a> MeshBuilder<'a> {
                 }
             }
 
+            // Always add a "__missing__" sentinel tile so faces whose texture
+            // couldn't be resolved have *something* to sample — otherwise their
+            // UVs stay in local [0,1] space and sample the entire atlas, which
+            // renders as a tiny collapsed strip of the full atlas on the block.
+            atlas_builder.add_texture(
+                MISSING_TEXTURE_KEY.to_string(),
+                make_missing_texture(),
+            );
+
             atlas_builder.build()?
         };
 
-        // Remap UVs to atlas coordinates (only non-greedy faces)
+        // Remap UVs to atlas coordinates (only non-greedy faces). Faces whose
+        // texture wasn't added to the atlas (missing PNG in pack, typo in a
+        // model, etc.) fall back to the __missing__ tile so the user sees a
+        // visible "unknown texture" marker instead of a full-atlas smear.
+        let missing_region = atlas.get_region(MISSING_TEXTURE_KEY).cloned();
+        let mut warned_missing: std::collections::HashSet<String> = std::collections::HashSet::new();
         for face_mapping in &self.face_textures {
-            if let Some(region) = atlas.get_region(&face_mapping.texture_path) {
-                // Each face has 4 vertices
+            let region = atlas.get_region(&face_mapping.texture_path)
+                .cloned()
+                .or_else(|| {
+                    if warned_missing.insert(face_mapping.texture_path.clone()) {
+                        eprintln!(
+                            "Warning: no atlas region for texture '{}' — falling back to missing-texture tile",
+                            face_mapping.texture_path,
+                        );
+                    }
+                    missing_region.clone()
+                });
+            if let Some(region) = region {
                 for i in 0..4 {
                     let vertex_idx = face_mapping.vertex_start as usize + i;
                     if vertex_idx < self.mesh.vertices.len() {
                         let vertex = &mut self.mesh.vertices[vertex_idx];
-                        // Transform UV from [0,1] local space to atlas region
                         vertex.uv = region.transform_uv(vertex.uv[0], vertex.uv[1]);
                     }
                 }
