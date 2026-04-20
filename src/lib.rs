@@ -189,5 +189,38 @@ pub fn load_resource_pack_from_bytes(data: &[u8]) -> Result<ResourcePack> {
     resource_pack::loader::load_from_bytes(data)
 }
 
+/// Load multiple resource packs in priority order and return the merged pack.
+///
+/// Packs are applied lowest priority first — later packs overlay earlier
+/// ones on per-key collision, mirroring Minecraft's own pack-ordering
+/// semantics. An empty iterator yields an empty `ResourcePack`.
+pub fn load_resource_packs<I, P>(paths: I) -> Result<ResourcePack>
+where
+    I: IntoIterator<Item = P>,
+    P: AsRef<std::path::Path>,
+{
+    let mut merged = ResourcePack::new();
+    for path in paths {
+        let higher = resource_pack::loader::load_from_path(path)?;
+        merged.overlay(higher);
+    }
+    Ok(merged)
+}
+
+/// Load multiple resource packs from in-memory byte buffers (WASM-friendly).
+/// Buffers are applied lowest priority first — later buffers overlay earlier ones.
+pub fn load_resource_packs_from_bytes<I, B>(datas: I) -> Result<ResourcePack>
+where
+    I: IntoIterator<Item = B>,
+    B: AsRef<[u8]>,
+{
+    let mut merged = ResourcePack::new();
+    for data in datas {
+        let higher = resource_pack::loader::load_from_bytes(data.as_ref())?;
+        merged.overlay(higher);
+    }
+    Ok(merged)
+}
+
 #[cfg(feature = "wasm")]
 pub mod wasm;
