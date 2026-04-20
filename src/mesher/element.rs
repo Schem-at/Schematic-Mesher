@@ -198,7 +198,7 @@ impl<'a> MeshBuilder<'a> {
             }
         }
 
-        // Waterlogged blocks: add water source overlay
+        // Waterlogged blocks: add water source overlay.
         if liquid::is_waterlogged(block) {
             let water_state = FluidState {
                 fluid_type: liquid::FluidType::Water,
@@ -219,14 +219,29 @@ impl<'a> MeshBuilder<'a> {
         block: &InputBlock,
         state: &FluidState,
     ) -> Result<()> {
+        self.add_liquid_inset(pos, block, state, 0.0)
+    }
+
+    /// Same as `add_liquid` but shrinks the generated water cube by `inset`
+    /// toward its block center. Used for waterlogged blocks so the water's
+    /// boundary faces don't coincide with the host block's own faces.
+    fn add_liquid_inset(
+        &mut self,
+        pos: BlockPosition,
+        block: &InputBlock,
+        state: &FluidState,
+        inset: f32,
+    ) -> Result<()> {
         // Get the block map for neighbor lookups
         let empty_map = HashMap::new();
         let block_map = self.block_map.unwrap_or(&empty_map);
 
-        // Determine base color: water uses tint, lava uses white
+        // Determine base color: water always uses the biome water tint (MC applies
+        // this regardless of host block, including waterlogged stairs/slabs/etc).
+        // Lava is never tinted.
         let base_color = match state.fluid_type {
             liquid::FluidType::Water => {
-                let mut c = self.config.tint_provider.get_tint(block, 0);
+                let mut c = self.config.tint_provider.colors().water;
                 c[3] = 0.8; // Water is semi-transparent
                 c
             }
@@ -238,8 +253,21 @@ impl<'a> MeshBuilder<'a> {
             self.culler.map(|c| c.is_fully_opaque_at(p)).unwrap_or(false)
         };
 
-        let (vertices, indices, face_textures) =
+        let (mut vertices, indices, face_textures) =
             liquid::generate_fluid_geometry(pos, state, block_map, is_opaque, base_color);
+
+        // Apply inset: pull each vertex toward the block center. At inset=0.002
+        // the shift is imperceptible but enough to eliminate coplanar z-fighting.
+        if inset > 0.0 {
+            let cx = pos.x as f32 + 0.5;
+            let cy = pos.y as f32 + 0.5;
+            let cz = pos.z as f32 + 0.5;
+            for v in &mut vertices {
+                v.position[0] += (cx - v.position[0]).signum() * inset;
+                v.position[1] += (cy - v.position[1]).signum() * inset;
+                v.position[2] += (cz - v.position[2]).signum() * inset;
+            }
+        }
 
         // Register texture refs
         self.texture_refs.insert(state.still_texture().to_string());
@@ -387,8 +415,34 @@ impl<'a> MeshBuilder<'a> {
         block: &InputBlock,
         mob_type: entity::MobType,
     ) -> Result<()> {
-        let (vertices, indices, face_textures) =
+        let (vertices, indices, mut face_textures) =
             entity::generate_mob_geometry(block, mob_type);
+
+        // Villagers render as three stacked draw passes in MC: base skin +
+        // biome overlay + profession overlay. Composite them into one texture.
+        if matches!(mob_type, entity::MobType::Villager) {
+            let biome = block.properties.get("biome")
+                .map(|s| s.as_str()).unwrap_or("plains");
+            let profession = block.properties.get("profession")
+                .map(|s| s.as_str()).unwrap_or("none");
+            let tex_key = format!("_villager/{}/{}", biome, profession);
+
+            if !self.dynamic_textures.contains_key(&tex_key) {
+                if let Some(tex) = entity::villager_texture::composite_villager_texture(
+                    self.resource_pack, biome, profession,
+                ) {
+                    self.dynamic_textures.insert(tex_key.clone(), tex);
+                }
+            }
+
+            if self.dynamic_textures.contains_key(&tex_key) {
+                for ft in face_textures.iter_mut() {
+                    if ft.texture == "entity/villager/villager" {
+                        ft.texture = tex_key.clone();
+                    }
+                }
+            }
+        }
 
         // Add base geometry (may be empty for dropped items)
         if !vertices.is_empty() {
@@ -466,11 +520,17 @@ impl<'a> MeshBuilder<'a> {
         // Sheep: render wool overlay
         if matches!(mob_type, entity::MobType::Sheep) {
             let mut wool_model = crate::mesher::entity::sheep::sheep_wool_model();
-            // Apply baby scaling to wool overlay too
+            // Apply baby scaling to wool overlay too (head gets same extra 2× so
+            // it tracks the base sheep's big-head proportions).
             if block.properties.get("is_baby").map(|v| v == "true").unwrap_or(false) {
                 if let Some(root) = wool_model.parts.first_mut() {
                     root.pose.scale = [0.5, 0.5, 0.5];
                     root.pose.position[1] = 12.0;
+                    if let Some(head) = root.children.first_mut() {
+                        head.pose.scale[0] *= 2.0;
+                        head.pose.scale[1] *= 2.0;
+                        head.pose.scale[2] *= 2.0;
+                    }
                 }
             }
             let facing = block.properties.get("facing")
@@ -514,13 +574,21 @@ impl<'a> MeshBuilder<'a> {
         if matches!(mob_type, entity::MobType::Player) {
             let tex_key = format!("_player/{}_{}_{}", pos.x, pos.y, pos.z);
             if !self.dynamic_textures.contains_key(&tex_key) {
-                // Try hex skin property
-                if let Some(skin_hex) = block.properties.get("skin") {
-                    if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+                // Try base64 skin property first (primary path for WASM/JS callers).
+                if let Some(skin_b64) = block.properties.get("skin_base64") {
+                    if let Some(skin_tex) = entity::skull::decode_base64_skin(skin_b64) {
                         self.dynamic_textures.insert(tex_key.clone(), skin_tex);
                     }
                 }
-                // Fallback to Steve/Alex from resource pack
+                // Then try hex skin property (legacy/inline-in-Rust path).
+                if !self.dynamic_textures.contains_key(&tex_key) {
+                    if let Some(skin_hex) = block.properties.get("skin") {
+                        if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+                            self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                        }
+                    }
+                }
+                // Finally fall back to Steve/Alex from the resource pack.
                 if !self.dynamic_textures.contains_key(&tex_key) {
                     let fallback = entity::skull::player_skin_fallback_path(block);
                     if let Some(tex) = self.resource_pack.get_texture(fallback) {
@@ -571,7 +639,213 @@ impl<'a> MeshBuilder<'a> {
             }
         }
 
+        // Equipment overlays (saddle on pig/horse, horse armor). Rendered as a
+        // second pass over the mob's model with cubes inflated slightly.
+        if !matches!(mob_type, entity::MobType::Player
+            | entity::MobType::DroppedItem
+            | entity::MobType::ItemFrame
+            | entity::MobType::GlowItemFrame
+            | entity::MobType::Boat
+            | entity::MobType::ChestBoat)
+        {
+            let base_model = entity::mob::build_mob_model(mob_type, block);
+            let overlays = entity::equipment::overlays_for(mob_type, block, &base_model);
+            if !overlays.is_empty() {
+                let facing = block.properties.get("facing")
+                    .map(|s| s.as_str()).unwrap_or("south");
+                let facing_angle = entity::facing_rotation_rad(facing);
+                let facing_mat = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+                    * glam::Mat4::from_rotation_y(facing_angle)
+                    * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+                for overlay in overlays {
+                    let mut verts = Vec::new();
+                    let mut indices = Vec::new();
+                    let mut faces = Vec::new();
+                    entity::traverse_parts(
+                        &overlay.model.parts, glam::Mat4::IDENTITY, &facing_mat,
+                        &overlay.model, &mut verts, &mut indices, &mut faces,
+                    );
+                    if !verts.is_empty() {
+                        self.add_offset_geometry(pos, [0.0, 0.0, 0.0], &verts, &indices, &faces);
+                    }
+                }
+            }
+        }
+
+        // Passenger / rider — e.g. a player on a saddled pig, or a zombie on a minecart.
+        // Host mobs advertise a mount offset via `entity::rider_offset`. We generate
+        // the rider's geometry and translate it onto that saddle point. Only one level
+        // of nesting is supported (the rider's own `rider` prop is ignored).
+        if let Some(rider_name) = block.properties.get("rider").cloned() {
+            self.add_rider_on(pos, block, mob_type, &rider_name)?;
+        }
+
         Ok(())
+    }
+
+    /// Generate geometry for a rider sitting on `host_mob` and add it to the mesh.
+    fn add_rider_on(
+        &mut self,
+        host_pos: BlockPosition,
+        host_block: &crate::types::InputBlock,
+        host_mob: entity::MobType,
+        rider_name: &str,
+    ) -> Result<()> {
+        use crate::types::InputBlock;
+
+        let bare = rider_name.strip_prefix("entity:").unwrap_or(rider_name);
+        let mut rider_block = InputBlock::new(&format!("entity:{}", bare));
+
+        // Rider faces the same way as the host by default, and inherits any visual
+        // props the rider's renderer needs (skin, armor, etc.).
+        let host_facing = host_block.properties.get("facing")
+            .map(|s| s.as_str()).unwrap_or("south");
+        rider_block.properties.insert("facing".to_string(), host_facing.to_string());
+        for key in ["skin", "skin_base64", "uuid", "slim", "helmet", "chestplate",
+                    "leggings", "boots", "color", "variant", "is_baby"] {
+            if let Some(v) = host_block.properties.get(key) {
+                rider_block.properties.insert(key.to_string(), v.clone());
+            }
+        }
+        // Copy pose properties so a riding player can have posed arms/legs.
+        for key in ["HeadPose", "BodyPose", "RightArmPose", "LeftArmPose",
+                    "RightLegPose", "LeftLegPose"] {
+            if let Some(v) = host_block.properties.get(key) {
+                rider_block.properties.insert(key.to_string(), v.clone());
+            }
+        }
+
+        let rider_type = match entity::detect_mob(&rider_block) {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+
+        // Apply MC's default passenger sitting pose to humanoids/players, unless
+        // the host already specified leg poses. Values from HumanoidModel.setupAnim
+        // when `isPassenger`: legs bent forward ~81° and spread ±18°.
+        let is_humanoid_rider = matches!(
+            rider_type,
+            entity::MobType::Player | entity::MobType::Zombie | entity::MobType::Skeleton
+                | entity::MobType::Villager | entity::MobType::ArmorStand
+        );
+        if is_humanoid_rider && !rider_block.properties.contains_key("RightLegPose") {
+            rider_block.properties.insert("RightLegPose".to_string(), "-81,18,0".to_string());
+            rider_block.properties.insert("LeftLegPose".to_string(), "-81,-18,0".to_string());
+        }
+
+        let saddle = entity::rider_offset(host_mob);
+
+        // Player riders use the dynamic-skin path; other mobs use the standard one.
+        if matches!(rider_type, entity::MobType::Player) {
+            let tex_key = format!("_player/{}_{}_{}_rider", host_pos.x, host_pos.y, host_pos.z);
+            if !self.dynamic_textures.contains_key(&tex_key) {
+                if let Some(skin_b64) = rider_block.properties.get("skin_base64") {
+                    if let Some(skin_tex) = entity::skull::decode_base64_skin(skin_b64) {
+                        self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                    }
+                }
+                if !self.dynamic_textures.contains_key(&tex_key) {
+                    if let Some(skin_hex) = rider_block.properties.get("skin") {
+                        if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+                            self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                        }
+                    }
+                }
+                if !self.dynamic_textures.contains_key(&tex_key) {
+                    let fallback = entity::skull::player_skin_fallback_path(&rider_block);
+                    if let Some(tex) = self.resource_pack.get_texture(fallback) {
+                        self.dynamic_textures.insert(tex_key.clone(), tex.clone());
+                    }
+                }
+            }
+
+            let model = entity::player::player_model(&rider_block, &tex_key);
+            let facing_angle = entity::facing_rotation_rad(host_facing);
+            let facing_mat = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+                * glam::Mat4::from_rotation_y(facing_angle)
+                * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+
+            let mut verts = Vec::new();
+            let mut indices = Vec::new();
+            let mut faces = Vec::new();
+            entity::traverse_parts(
+                &model.parts, glam::Mat4::IDENTITY, &facing_mat, &model,
+                &mut verts, &mut indices, &mut faces,
+            );
+            self.add_offset_geometry(host_pos, saddle, &verts, &indices, &faces);
+        } else {
+            let (verts, indices, mut faces) =
+                entity::generate_mob_geometry(&rider_block, rider_type);
+
+            // Villagers need the biome+profession compositing like the top-level
+            // villager handling does; without it the rider is "naked".
+            if matches!(rider_type, entity::MobType::Villager) {
+                let biome = rider_block.properties.get("biome")
+                    .map(|s| s.as_str()).unwrap_or("plains");
+                let profession = rider_block.properties.get("profession")
+                    .map(|s| s.as_str()).unwrap_or("none");
+                let tex_key = format!("_villager/{}/{}", biome, profession);
+                if !self.dynamic_textures.contains_key(&tex_key) {
+                    if let Some(tex) = entity::villager_texture::composite_villager_texture(
+                        self.resource_pack, biome, profession,
+                    ) {
+                        self.dynamic_textures.insert(tex_key.clone(), tex);
+                    }
+                }
+                if self.dynamic_textures.contains_key(&tex_key) {
+                    for ft in faces.iter_mut() {
+                        if ft.texture == "entity/villager/villager" {
+                            ft.texture = tex_key.clone();
+                        }
+                    }
+                }
+            }
+
+            if !verts.is_empty() {
+                self.add_offset_geometry(host_pos, saddle, &verts, &indices, &faces);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Push entity geometry onto the mesh at `pos + extra_offset`. Used for riders.
+    fn add_offset_geometry(
+        &mut self,
+        pos: BlockPosition,
+        extra: [f32; 3],
+        vertices: &[crate::mesher::Vertex],
+        indices: &[u32],
+        face_textures: &[entity::EntityFaceTexture],
+    ) {
+        for ft in face_textures {
+            self.texture_refs.insert(ft.texture.clone());
+        }
+        let base_vertex = self.mesh.vertex_count() as u32;
+        let base_index = self.mesh.indices.len();
+
+        for v in vertices {
+            let mut vertex = *v;
+            vertex.position[0] += pos.x as f32 - 0.5 + extra[0];
+            vertex.position[1] += pos.y as f32 - 0.5 + extra[1];
+            vertex.position[2] += pos.z as f32 - 0.5 + extra[2];
+            self.mesh.add_vertex(vertex);
+        }
+        for &idx in indices {
+            self.mesh.indices.push(base_vertex + idx);
+        }
+
+        let mut idx_offset = base_index;
+        for ft in face_textures {
+            let face_v_start = (idx_offset - base_index) as u32 / 6 * 4 + base_vertex;
+            self.face_textures.push(FaceTextureMapping {
+                vertex_start: face_v_start,
+                index_start: idx_offset,
+                texture_path: ft.texture.clone(),
+                is_transparent: ft.is_transparent,
+            });
+            idx_offset += 6;
+        }
     }
 
     /// Add inventory hologram above a container block.
@@ -803,9 +1077,14 @@ impl<'a> MeshBuilder<'a> {
         }
 
         // Composite texture if not cached
+        let kind = if is_wall {
+            entity::sign_text::SignKind::Wall
+        } else {
+            entity::sign_text::SignKind::Standing
+        };
         if !self.dynamic_textures.contains_key(&tex_key) {
             if let Some(tex) = entity::sign_text::composite_sign_with_text(
-                self.resource_pack, base_texture, &lines, color, glowing,
+                self.resource_pack, base_texture, &lines, color, glowing, kind,
             ) {
                 self.dynamic_textures.insert(tex_key.clone(), tex);
             } else {
@@ -859,11 +1138,35 @@ impl<'a> MeshBuilder<'a> {
         pos: BlockPosition,
         block: &InputBlock,
     ) -> Result<()> {
-        let (vertices, indices, face_textures) =
+        let (vertices, indices, mut face_textures) =
             entity::decorated_pot::generate_decorated_pot_geometry(block);
 
         if vertices.is_empty() {
             return Ok(());
+        }
+
+        // Pattern (sherd) textures are transparent around the pot silhouette —
+        // rendering them directly leaves "holes" where the pattern doesn't cover.
+        // MC renders patterns on top of an opaque `decorated_pot_side` texture.
+        // We composite each unique pattern onto the side texture and swap the
+        // face texture to point at the composite.
+        for ft in face_textures.iter_mut() {
+            if let Some(pat) = ft.texture.strip_prefix("entity/decorated_pot/")
+                .and_then(|s| s.strip_suffix("_pottery_pattern"))
+            {
+                let key = format!("_pot/{}", pat);
+                if !self.dynamic_textures.contains_key(&key) {
+                    if let Some(tex) = composite_pot_side(self.resource_pack, pat) {
+                        self.dynamic_textures.insert(key.clone(), tex);
+                    }
+                }
+                if self.dynamic_textures.contains_key(&key) {
+                    ft.texture = key;
+                    // Composite is fully opaque — route through the solid mesh
+                    // so we don't get alpha-cutout artifacts.
+                    ft.is_transparent = false;
+                }
+            }
         }
 
         self.add_item_geometry(pos, &vertices, &indices, &face_textures);
@@ -883,11 +1186,18 @@ impl<'a> MeshBuilder<'a> {
         // Determine texture key
         let tex_key = format!("_player_head/{}_{}_{}", pos.x, pos.y, pos.z);
 
-        // Try to decode hex skin property, otherwise use fallback
+        // Prefer base64 skin (the WASM/JS-friendly path), then hex, then fallback.
         if !self.dynamic_textures.contains_key(&tex_key) {
-            if let Some(skin_hex) = block.properties.get("skin") {
-                if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+            if let Some(skin_b64) = block.properties.get("skin_base64") {
+                if let Some(skin_tex) = entity::skull::decode_base64_skin(skin_b64) {
                     self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                }
+            }
+            if !self.dynamic_textures.contains_key(&tex_key) {
+                if let Some(skin_hex) = block.properties.get("skin") {
+                    if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+                        self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                    }
                 }
             }
             // If no skin decoded, load fallback from resource pack
@@ -965,6 +1275,7 @@ impl<'a> MeshBuilder<'a> {
         if !self.dynamic_textures.contains_key(&tex_key) {
             if let Some(tex) = entity::sign_text::composite_sign_with_text(
                 self.resource_pack, base_texture, &lines, color, glowing,
+                entity::sign_text::SignKind::Hanging,
             ) {
                 self.dynamic_textures.insert(tex_key.clone(), tex);
             } else {
@@ -1977,6 +2288,54 @@ fn dye_rgb(color: &str) -> [f32; 4] {
         "black" => [0.10, 0.10, 0.13, 1.0],
         _ => [1.0, 1.0, 1.0, 1.0],
     }
+}
+
+/// Composite a pottery sherd pattern on top of the opaque `decorated_pot_side`
+/// texture. Mirrors MC's DecoratedPotRenderer, which draws the pattern as a
+/// second pass over the side. Returns an opaque texture suitable for rendering
+/// directly on a pot's side face without alpha holes.
+fn composite_pot_side(pack: &ResourcePack, pattern: &str) -> Option<TextureData> {
+    let side = pack.get_texture("entity/decorated_pot/decorated_pot_side")?;
+    let side_frame = side.first_frame();
+    let mut pixels = side_frame.pixels.clone();
+    let w = side_frame.width;
+    let h = side_frame.height;
+
+    let pat_path = format!("entity/decorated_pot/{}_pottery_pattern", pattern);
+    if let Some(pat) = pack.get_texture(&pat_path) {
+        let pat_frame = pat.first_frame();
+        let pw = pat_frame.width.min(w);
+        let ph = pat_frame.height.min(h);
+        for y in 0..ph {
+            for x in 0..pw {
+                let src = ((y * pat_frame.width + x) * 4) as usize;
+                let dst = ((y * w + x) * 4) as usize;
+                if src + 3 >= pat_frame.pixels.len() || dst + 3 >= pixels.len() {
+                    continue;
+                }
+                let sa = pat_frame.pixels[src + 3] as f32 / 255.0;
+                if sa < 0.01 {
+                    continue;
+                }
+                for c in 0..3 {
+                    let sv = pat_frame.pixels[src + c] as f32;
+                    let dv = pixels[dst + c] as f32;
+                    pixels[dst + c] = (sv * sa + dv * (1.0 - sa)).min(255.0) as u8;
+                }
+                // Output stays fully opaque — pot side is solid pottery.
+                pixels[dst + 3] = 255;
+            }
+        }
+    }
+
+    Some(TextureData {
+        width: w,
+        height: h,
+        pixels,
+        is_animated: false,
+        frame_count: 1,
+        animation: None,
+    })
 }
 
 #[cfg(test)]

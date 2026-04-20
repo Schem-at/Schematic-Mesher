@@ -67,15 +67,18 @@ pub(crate) fn banner_model(is_standing: bool, texture_path: &str) -> EntityModel
         children: vec![],
     });
 
-    // Y-down → Y-up root wrapper
-    // Banner model is centered at origin in MC coords, pole goes down
-    // Position [8, 24, 8] centers in block, PI rotation flips Y
+    // Root wrapper matching MC BannerRenderer's transform:
+    //   translate(0.5, 0, 0.5) · rotateY(yaw) · scale(2/3, -2/3, -2/3)
+    // The negative Y/Z in MC's scale is equivalent to RotX(π) combined with a
+    // uniform 2/3 downscale. Position Y=0 (not 24) because MC anchors the
+    // banner at the block's bottom, not its top.
+    let scale = 2.0 / 3.0;
     let root = EntityPart {
         cubes: vec![],
         pose: EntityPartPose {
-            position: [8.0, 24.0, 8.0],
+            position: [8.0, 0.0, 8.0],
             rotation: [std::f32::consts::PI, 0.0, 0.0],
-            ..Default::default()
+            scale: [scale, scale, scale],
         },
         children: parts,
     };

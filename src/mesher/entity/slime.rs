@@ -4,11 +4,11 @@ use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose};
 /// From SlimeModel.java (MC 1.21.4).
 /// Outer transparent cube + inner smaller cube + eyes + mouth.
 pub(super) fn slime_model() -> EntityModelDef {
-    // Outer translucent cube
+    // Outer translucent cube (8x8x8 per MC 1.21.5 createOuterBodyLayer)
     let outer_cube = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-3.0, 17.0, -3.0],
-            dimensions: [6.0, 6.0, 6.0],
+            origin: [-4.0, 16.0, -4.0],
+            dimensions: [8.0, 8.0, 8.0],
             tex_offset: [0, 0],
             inflate: 0.0,
             mirror: false,
@@ -18,11 +18,11 @@ pub(super) fn slime_model() -> EntityModelDef {
         children: vec![],
     };
 
-    // Inner cube (smaller, opaque)
+    // Inner cube (6x6x6 per MC 1.21.5 createInnerBodyLayer)
     let inner_cube = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-2.0, 18.0, -2.0],
-            dimensions: [4.0, 4.0, 4.0],
+            origin: [-3.0, 17.0, -3.0],
+            dimensions: [6.0, 6.0, 6.0],
             tex_offset: [0, 16],
             inflate: 0.0,
             mirror: false,

@@ -1,6 +1,7 @@
 use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose, MobType};
 use super::armor_stand;
 use super::bat;
+use super::boat;
 use super::cat;
 use super::chicken;
 use super::cow;
@@ -15,7 +16,7 @@ use super::villager;
 use super::wolf;
 use crate::types::InputBlock;
 
-pub(super) fn build_mob_model(mob_type: MobType, block: &InputBlock) -> EntityModelDef {
+pub(crate) fn build_mob_model(mob_type: MobType, block: &InputBlock) -> EntityModelDef {
     let mut model = match mob_type {
         MobType::Zombie => zombie_model(),
         MobType::Skeleton => skeleton_model(),
@@ -35,6 +36,14 @@ pub(super) fn build_mob_model(mob_type: MobType, block: &InputBlock) -> EntityMo
         MobType::Slime => slime::slime_model(),
         MobType::IronGolem => iron_golem::iron_golem_model(),
         MobType::Bat => bat::bat_model(),
+        MobType::Boat => boat::boat_model(
+            block.properties.get("wood").map(|s| s.as_str()).unwrap_or("oak"),
+            false,
+        ),
+        MobType::ChestBoat => boat::boat_model(
+            block.properties.get("wood").map(|s| s.as_str()).unwrap_or("oak"),
+            true,
+        ),
         MobType::ItemFrame | MobType::GlowItemFrame | MobType::DroppedItem | MobType::Player => {
             unreachable!("Item frames, dropped items, and players handled in generate_mob_geometry/add_mob")
         }
@@ -44,7 +53,7 @@ pub(super) fn build_mob_model(mob_type: MobType, block: &InputBlock) -> EntityMo
     if block.properties.get("is_baby").map(|v| v == "true").unwrap_or(false)
         && supports_baby(mob_type)
     {
-        apply_baby_scaling(&mut model);
+        apply_baby_scaling(&mut model, mob_type);
     }
 
     model
@@ -66,13 +75,56 @@ fn supports_baby(mob_type: MobType) -> bool {
     )
 }
 
-/// Scale a mob model to baby size (0.5x).
-/// Adjusts the root part's scale and Y position so feet stay on the ground.
-fn apply_baby_scaling(model: &mut EntityModelDef) {
-    if let Some(root) = model.parts.first_mut() {
-        root.pose.scale = [0.5, 0.5, 0.5];
-        // Root Y is 24 (1.5 blocks). Baby at 0.5x only needs Y=12 (0.75 blocks)
-        root.pose.position[1] = 12.0;
+/// Head-part indices within each mob's top-level children. MC's
+/// `BabyModelTransform` uses part names (`Set.of("head")` etc.), but our
+/// EntityPart tree is indexed by position — so we encode the index here.
+/// Almost every mob puts `head` at index 0; horses are `(body, head_parts, …)`.
+fn baby_head_indices(mob_type: MobType) -> &'static [usize] {
+    match mob_type {
+        MobType::Horse => &[1],
+        _ => &[0],
+    }
+}
+
+/// Extra multiplier applied to the head on top of the uniform 0.5× baby scale,
+/// so the head ends up proportionally bigger than the body. Values chosen to
+/// match MC's `BabyModelTransform(scaleHead, babyHeadScale, babyBodyScale)`
+/// ratio of `(scaleHead ? 1.5/babyHeadScale : 1.0) / (1/babyBodyScale)`.
+fn baby_head_extra_scale(mob_type: MobType) -> f32 {
+    match mob_type {
+        // Humanoids: 1.5/2 for head ÷ 1/2 for body = 1.5
+        MobType::Zombie | MobType::Skeleton => 1.5,
+        // Villager: MC uses uniform scaling (no big head)
+        MobType::Villager => 1.0,
+        // Horse: 1.5/2.7272 ÷ 1/2 ≈ 1.1
+        MobType::Horse => 1.1,
+        // Everything else: head f=1.0 ÷ body f=0.5 = 2.0 (cow/pig/sheep default)
+        _ => 2.0,
+    }
+}
+
+/// Scale a mob model to baby proportions: uniform 0.5× on the root, plus an
+/// extra multiplier on the head part(s) so the head remains proportionally
+/// larger than the body — the characteristic "big head baby" look.
+fn apply_baby_scaling(model: &mut EntityModelDef, mob_type: MobType) {
+    let root = match model.parts.first_mut() {
+        Some(r) => r,
+        None => return,
+    };
+    // Uniform 0.5× root scale; Y translate halves so feet stay on the ground.
+    root.pose.scale = [0.5, 0.5, 0.5];
+    root.pose.position[1] = 12.0;
+
+    let head_mul = baby_head_extra_scale(mob_type);
+    if head_mul == 1.0 {
+        return;
+    }
+    for (i, child) in root.children.iter_mut().enumerate() {
+        if baby_head_indices(mob_type).contains(&i) {
+            child.pose.scale[0] *= head_mul;
+            child.pose.scale[1] *= head_mul;
+            child.pose.scale[2] *= head_mul;
+        }
     }
 }
 

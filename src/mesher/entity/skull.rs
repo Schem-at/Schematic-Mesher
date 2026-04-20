@@ -70,7 +70,7 @@ pub(super) fn skull_model(skull_type: SkullType) -> EntityModelDef {
         texture_path: texture_path.to_string(),
         texture_size,
         parts: vec![root],
-        is_opaque: has_hat,
+        is_opaque: !has_hat,
     }
 }
 
@@ -134,8 +134,22 @@ pub(crate) fn decode_hex_skin(hex_str: &str) -> Option<TextureData> {
         bytes.push(byte);
     }
 
-    // Decode PNG
-    let img = image::load_from_memory(&bytes).ok()?;
+    png_bytes_to_texture(&bytes)
+}
+
+/// Decode a base64-encoded PNG skin into TextureData.
+///
+/// Accepts both standard (+/) and URL-safe (-_) alphabets, with or without
+/// padding. This is the intended path for WASM/JS callers: resolve a username
+/// to a skin PNG in JavaScript (via Mojang's session API), encode as base64,
+/// and pass it through the `skin_base64` block property.
+pub(crate) fn decode_base64_skin(b64: &str) -> Option<TextureData> {
+    let bytes = decode_base64(b64)?;
+    png_bytes_to_texture(&bytes)
+}
+
+fn png_bytes_to_texture(bytes: &[u8]) -> Option<TextureData> {
+    let img = image::load_from_memory(bytes).ok()?;
     let rgba = img.to_rgba8();
     Some(TextureData {
         width: rgba.width(),
@@ -145,6 +159,34 @@ pub(crate) fn decode_hex_skin(hex_str: &str) -> Option<TextureData> {
         frame_count: 1,
         animation: None,
     })
+}
+
+/// Base64 decoder. Supports both `+/` and URL-safe `-_` alphabets; `=` padding
+/// is tolerated but not required. Returns None on invalid characters.
+fn decode_base64(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u32 = 0;
+    for b in s.bytes() {
+        let v: u32 = match b {
+            b'A'..=b'Z' => (b - b'A') as u32,
+            b'a'..=b'z' => (b - b'a' + 26) as u32,
+            b'0'..=b'9' => (b - b'0' + 52) as u32,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' => continue,
+            c if c.is_ascii_whitespace() => continue,
+            _ => return None,
+        };
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1u32 << bits).wrapping_sub(1);
+        }
+    }
+    Some(out)
 }
 
 /// Determine player skin fallback path based on UUID.

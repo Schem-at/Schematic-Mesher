@@ -66,11 +66,12 @@ fn build_scene(s: &mut Scene) {
     s.set_with(4, 1, 14, "minecraft:creeper_head", &[("rotation", "8")]);
     s.set_with(7, 1, 14, "minecraft:zombie_head", &[("rotation", "4")]);
 
-    // Wall skulls (on stone wall)
+    // Wall skulls (on stone wall). MC: `facing` = direction skull faces, wall on -facing side.
+    // Stone is at z+1 (south), so skull faces north (away from stone).
     s.set(1, 2, 16, "minecraft:stone");
-    s.set_with(1, 2, 15, "minecraft:skeleton_wall_skull", &[("facing", "south")]);
+    s.set_with(1, 2, 15, "minecraft:skeleton_wall_skull", &[("facing", "north")]);
     s.set(4, 2, 16, "minecraft:stone");
-    s.set_with(4, 2, 15, "minecraft:creeper_wall_head", &[("facing", "south")]);
+    s.set_with(4, 2, 15, "minecraft:creeper_wall_head", &[("facing", "north")]);
 
     // === Section 6 (z=18): Mobs ===
     s.set_with(1, 1, 18, "entity:zombie", &[("facing", "south")]);
@@ -81,6 +82,13 @@ fn build_scene(s: &mut Scene) {
     s.set_with(16, 1, 18, "entity:cow", &[("facing", "south")]);
     s.set_with(19, 1, 18, "entity:sheep", &[("facing", "south")]);
     s.set_with(22, 1, 18, "entity:villager", &[("facing", "south")]);
+    // Biome + profession overlays composite onto the base skin.
+    s.set_with(22, 1, 19, "entity:villager", &[
+        ("facing", "south"), ("biome", "plains"), ("profession", "farmer"),
+    ]);
+    s.set_with(19, 1, 20, "entity:villager", &[
+        ("facing", "south"), ("biome", "desert"), ("profession", "librarian"),
+    ]);
     // Sheep with wool color
     s.set_with(19, 1, 19, "entity:sheep", &[("facing", "south"), ("color", "red")]);
     s.set_with(22, 1, 19, "entity:sheep", &[("facing", "south"), ("color", "blue")]);
@@ -526,6 +534,53 @@ fn build_scene(s: &mut Scene) {
     s.set(22, 1, 1, "minecraft:oak_planks");
     s.set(22, 1, 4, "minecraft:diamond_block");
     s.set(22, 1, 8, "minecraft:iron_block");
+
+    // === Section 27 (z=83): Player skin rendering tests ===
+    // Default Steve (wide model, no skin/uuid)
+    s.set_with(1, 1, 83, "entity:player", &[("facing", "south")]);
+    // Alex via uuid (odd first hex digit → slim fallback)
+    s.set_with(4, 1, 83, "entity:player", &[("facing", "south"), ("uuid", "1a2b3c4d")]);
+    // Explicit slim model
+    s.set_with(7, 1, 83, "entity:player", &[("facing", "south"), ("slim", "true")]);
+
+    // Real base64-encoded skins fetched from Mojang session API. Demonstrates
+    // the WASM/JS-friendly `skin_base64` property path — any resolver (JS
+    // fetch, native HTTP, file read) can produce this format.
+    const SLOIMAY_SKIN: &str = include_str!("skins/sloimay.b64");
+    const PURPLERS_SKIN: &str = include_str!("skins/purplers.b64");
+    const NANO_SKIN: &str = include_str!("skins/nano.b64");
+    s.set_with(10, 1, 83, "entity:player", &[
+        ("facing", "south"), ("skin_base64", SLOIMAY_SKIN),
+    ]);
+    s.set_with(13, 1, 83, "entity:player", &[
+        ("facing", "south"), ("skin_base64", PURPLERS_SKIN),
+    ]);
+    s.set_with(16, 1, 83, "entity:player", &[
+        ("facing", "south"), ("skin_base64", NANO_SKIN),
+    ]);
+
+    // === Section 26 (z=79-81): Boats + riding ===
+    // Plain boat
+    s.set_with(1, 1, 79, "entity:boat", &[("facing", "south")]);
+    // Chest boat (oak + spruce variants)
+    s.set_with(4, 1, 79, "entity:chest_boat", &[("facing", "south")]);
+    s.set_with(7, 1, 79, "entity:chest_boat", &[("facing", "east"), ("wood", "spruce")]);
+    // Pig with a player riding (saddle inferred from rider)
+    s.set_with(10, 1, 79, "entity:pig", &[("facing", "south"), ("rider", "player")]);
+    // Saddled pig without rider (explicit saddle prop)
+    s.set_with(10, 1, 81, "entity:pig", &[("facing", "south"), ("saddle", "true")]);
+    // Armored horse
+    s.set_with(16, 1, 81, "entity:horse", &[
+        ("facing", "south"), ("saddle", "true"), ("horse_armor", "diamond"),
+    ]);
+    // Chest boat with a villager rider
+    s.set_with(13, 1, 79, "entity:chest_boat", &[("facing", "south"), ("rider", "villager")]);
+    // Horse with a player rider (diamond helmet)
+    s.set_with(16, 1, 79, "entity:horse", &[
+        ("facing", "south"), ("rider", "player"), ("helmet", "diamond"),
+    ]);
+    // Minecart with a zombie rider
+    s.set_with(19, 1, 79, "entity:minecart", &[("facing", "east"), ("rider", "zombie")]);
 }
 
 fn config() -> MesherConfig {

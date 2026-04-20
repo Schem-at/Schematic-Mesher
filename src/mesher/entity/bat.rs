@@ -1,20 +1,133 @@
 use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose};
 
-/// Bat model — texture `entity/bat`, 64x64.
-/// From BatModel.java (MC 1.21.4).
-/// Head, body, 2 wings (each with wing_tip child).
+/// Bat model — texture `entity/bat`, 32x32.
+/// From BatModel.java (MC 1.21.5).
 pub(super) fn bat_model() -> EntityModelDef {
-    let head = EntityPart {
+    // Ears are children of head.
+    let right_ear = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-3.0, -3.0, -3.0],
-            dimensions: [6.0, 6.0, 6.0],
-            tex_offset: [0, 0],
+            origin: [-2.5, -4.0, 0.0],
+            dimensions: [3.0, 5.0, 0.0],
+            tex_offset: [1, 15],
             inflate: 0.0,
             mirror: false,
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [0.0, 0.0, 0.0],
+            position: [-1.5, -2.0, 0.0],
+            ..Default::default()
+        },
+        children: vec![],
+    };
+
+    let left_ear = EntityPart {
+        cubes: vec![EntityCube {
+            origin: [-0.1, -3.0, 0.0],
+            dimensions: [3.0, 5.0, 0.0],
+            tex_offset: [8, 15],
+            inflate: 0.0,
+            mirror: false,
+            skip_faces: vec![],
+        }],
+        pose: EntityPartPose {
+            position: [1.1, -3.0, 0.0],
+            ..Default::default()
+        },
+        children: vec![],
+    };
+
+    let head = EntityPart {
+        cubes: vec![EntityCube {
+            origin: [-2.0, -3.0, -1.0],
+            dimensions: [4.0, 3.0, 2.0],
+            tex_offset: [0, 7],
+            inflate: 0.0,
+            mirror: false,
+            skip_faces: vec![],
+        }],
+        pose: EntityPartPose {
+            position: [0.0, 17.0, 0.0],
+            ..Default::default()
+        },
+        children: vec![right_ear, left_ear],
+    };
+
+    // Wings and feet are children of body.
+    let right_wing_tip = EntityPart {
+        cubes: vec![EntityCube {
+            origin: [-6.0, -2.0, 0.0],
+            dimensions: [6.0, 8.0, 0.0],
+            tex_offset: [16, 0],
+            inflate: 0.0,
+            mirror: false,
+            skip_faces: vec![],
+        }],
+        pose: EntityPartPose {
+            position: [-2.0, 0.0, 0.0],
+            ..Default::default()
+        },
+        children: vec![],
+    };
+
+    let right_wing = EntityPart {
+        cubes: vec![EntityCube {
+            origin: [-2.0, -2.0, 0.0],
+            dimensions: [2.0, 7.0, 0.0],
+            tex_offset: [12, 0],
+            inflate: 0.0,
+            mirror: false,
+            skip_faces: vec![],
+        }],
+        pose: EntityPartPose {
+            position: [-1.5, 0.0, 0.0],
+            ..Default::default()
+        },
+        children: vec![right_wing_tip],
+    };
+
+    let left_wing_tip = EntityPart {
+        cubes: vec![EntityCube {
+            origin: [0.0, -2.0, 0.0],
+            dimensions: [6.0, 8.0, 0.0],
+            tex_offset: [16, 8],
+            inflate: 0.0,
+            mirror: false,
+            skip_faces: vec![],
+        }],
+        pose: EntityPartPose {
+            position: [2.0, 0.0, 0.0],
+            ..Default::default()
+        },
+        children: vec![],
+    };
+
+    let left_wing = EntityPart {
+        cubes: vec![EntityCube {
+            origin: [0.0, -2.0, 0.0],
+            dimensions: [2.0, 7.0, 0.0],
+            tex_offset: [12, 7],
+            inflate: 0.0,
+            mirror: false,
+            skip_faces: vec![],
+        }],
+        pose: EntityPartPose {
+            position: [1.5, 0.0, 0.0],
+            ..Default::default()
+        },
+        children: vec![left_wing_tip],
+    };
+
+    let feet = EntityPart {
+        cubes: vec![EntityCube {
+            origin: [-1.5, 0.0, 0.0],
+            dimensions: [3.0, 2.0, 0.0],
+            tex_offset: [16, 16],
+            inflate: 0.0,
+            mirror: false,
+            skip_faces: vec![],
+        }],
+        pose: EntityPartPose {
+            position: [0.0, 5.0, 0.0],
             ..Default::default()
         },
         children: vec![],
@@ -22,81 +135,20 @@ pub(super) fn bat_model() -> EntityModelDef {
 
     let body = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-3.0, 4.0, -3.0],
-            dimensions: [6.0, 12.0, 6.0],
-            tex_offset: [0, 16],
-            inflate: 0.0,
-            mirror: false,
-            skip_faces: vec![],
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    // Right wing tip (child of right wing)
-    let right_wing_tip = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-8.0, 1.0, 1.5],
-            dimensions: [8.0, 12.0, 1.0],
-            tex_offset: [24, 16],
-            inflate: 0.0,
-            mirror: false,
-            skip_faces: vec![],
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    // Right wing
-    let right_wing = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-2.0, 1.0, 1.5],
-            dimensions: [10.0, 16.0, 1.0],
-            tex_offset: [42, 0],
+            origin: [-1.5, 0.0, -1.0],
+            dimensions: [3.0, 5.0, 2.0],
+            tex_offset: [0, 0],
             inflate: 0.0,
             mirror: false,
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [0.0, 1.0, 1.5],
+            position: [0.0, 17.0, 0.0],
             ..Default::default()
         },
-        children: vec![right_wing_tip],
+        children: vec![right_wing, left_wing, feet],
     };
 
-    // Left wing tip (child of left wing)
-    let left_wing_tip = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [0.0, 1.0, 1.5],
-            dimensions: [8.0, 12.0, 1.0],
-            tex_offset: [24, 16],
-            inflate: 0.0,
-            mirror: true,
-            skip_faces: vec![],
-        }],
-        pose: Default::default(),
-        children: vec![],
-    };
-
-    // Left wing
-    let left_wing = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-8.0, 1.0, 1.5],
-            dimensions: [10.0, 16.0, 1.0],
-            tex_offset: [42, 0],
-            inflate: 0.0,
-            mirror: true,
-            skip_faces: vec![],
-        }],
-        pose: EntityPartPose {
-            position: [0.0, 1.0, 1.5],
-            ..Default::default()
-        },
-        children: vec![left_wing_tip],
-    };
-
-    // Y-down → Y-up root wrapper
-    // Bat is small, roughly 1 block tall
     let root = EntityPart {
         cubes: vec![],
         pose: EntityPartPose {
@@ -104,13 +156,14 @@ pub(super) fn bat_model() -> EntityModelDef {
             rotation: [std::f32::consts::PI, 0.0, 0.0],
             ..Default::default()
         },
-        children: vec![head, body, right_wing, left_wing],
+        children: vec![head, body],
     };
 
     EntityModelDef {
         texture_path: "entity/bat".to_string(),
-        texture_size: [64, 64],
+        texture_size: [32, 32],
         parts: vec![root],
-        is_opaque: true,
+        // Wings/ears are zero-depth quads that may include alpha.
+        is_opaque: false,
     }
 }

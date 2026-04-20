@@ -1,7 +1,7 @@
 use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose};
 
 /// Spider model — texture `entity/spider/spider`, 64x32.
-/// From SpiderModel.java (MC 1.21.4).
+/// From SpiderModel.java (MC 1.21.5).
 pub(super) fn spider_model() -> EntityModelDef {
     let head = EntityPart {
         cubes: vec![EntityCube {
@@ -19,7 +19,7 @@ pub(super) fn spider_model() -> EntityModelDef {
         children: vec![],
     };
 
-    // Neck (body0 in MC code)
+    // body0 (neck)
     let neck = EntityPart {
         cubes: vec![EntityCube {
             origin: [-3.0, -3.0, -3.0],
@@ -36,7 +36,7 @@ pub(super) fn spider_model() -> EntityModelDef {
         children: vec![],
     };
 
-    // Abdomen (body1 in MC code)
+    // body1 (abdomen)
     let abdomen = EntityPart {
         cubes: vec![EntityCube {
             origin: [-5.0, -4.0, -6.0],
@@ -53,23 +53,32 @@ pub(super) fn spider_model() -> EntityModelDef {
         children: vec![],
     };
 
-    // 8 legs — 4 pairs, each pair mirrored
-    // Spider legs in MC use Y+Z rotation for the angled poses
-    let leg_tex = [18, 0]; // All legs use same texture offset
+    // MC uses two cube builders: right legs get box(-15, -1, -1, 16, 2, 2)
+    // extending toward -X from the pivot; left legs are mirrored with
+    // box(-1, -1, -1, 16, 2, 2) extending toward +X.
+    let f = 0.7853982_f32;   // PI/4
+    let f2 = 0.3926991_f32;  // PI/8
+    let f3 = 0.58119464_f32; // inner-leg Z rotation
 
-    // Right legs (negative X positions)
-    let right_leg_1 = spider_leg(leg_tex, [-4.0, 15.0, 2.0], 0.576, 0.1920);
-    let right_leg_2 = spider_leg(leg_tex, [-4.0, 15.0, 1.0], 0.2618, 0.1920);
-    let right_leg_3 = spider_leg(leg_tex, [-4.0, 15.0, 0.0], -0.2618, 0.1920);
-    let right_leg_4 = spider_leg(leg_tex, [-4.0, 15.0, -1.0], -0.576, 0.1920);
+    let legs = [
+        // (side_is_right, position, rot_y, rot_z)
+        (true,  [-4.0, 15.0,  2.0],  f,  -f),
+        (false, [ 4.0, 15.0,  2.0], -f,   f),
+        (true,  [-4.0, 15.0,  1.0],  f2, -f3),
+        (false, [ 4.0, 15.0,  1.0], -f2,  f3),
+        (true,  [-4.0, 15.0,  0.0], -f2, -f3),
+        (false, [ 4.0, 15.0,  0.0],  f2,  f3),
+        (true,  [-4.0, 15.0, -1.0], -f,  -f),
+        (false, [ 4.0, 15.0, -1.0],  f,   f),
+    ];
 
-    // Left legs (positive X positions)
-    let left_leg_1 = spider_leg(leg_tex, [4.0, 15.0, 2.0], -0.576, -0.1920);
-    let left_leg_2 = spider_leg(leg_tex, [4.0, 15.0, 1.0], -0.2618, -0.1920);
-    let left_leg_3 = spider_leg(leg_tex, [4.0, 15.0, 0.0], 0.2618, -0.1920);
-    let left_leg_4 = spider_leg(leg_tex, [4.0, 15.0, -1.0], 0.576, -0.1920);
+    let leg_parts: Vec<EntityPart> = legs.iter()
+        .map(|&(right, pos, ry, rz)| spider_leg(right, pos, ry, rz))
+        .collect();
 
     // Y-down → Y-up root wrapper
+    let mut children = vec![head, neck, abdomen];
+    children.extend(leg_parts);
     let root = EntityPart {
         cubes: vec![],
         pose: EntityPartPose {
@@ -77,11 +86,7 @@ pub(super) fn spider_model() -> EntityModelDef {
             rotation: [std::f32::consts::PI, 0.0, 0.0],
             ..Default::default()
         },
-        children: vec![
-            head, neck, abdomen,
-            right_leg_1, right_leg_2, right_leg_3, right_leg_4,
-            left_leg_1, left_leg_2, left_leg_3, left_leg_4,
-        ],
+        children,
     };
 
     EntityModelDef {
@@ -92,14 +97,19 @@ pub(super) fn spider_model() -> EntityModelDef {
     }
 }
 
-fn spider_leg(tex_offset: [u32; 2], position: [f32; 3], rot_y: f32, rot_z: f32) -> EntityPart {
+fn spider_leg(is_right: bool, position: [f32; 3], rot_y: f32, rot_z: f32) -> EntityPart {
+    let (origin, mirror) = if is_right {
+        ([-15.0, -1.0, -1.0], false)
+    } else {
+        ([-1.0, -1.0, -1.0], true)
+    };
     EntityPart {
         cubes: vec![EntityCube {
-            origin: [-15.0, -1.0, -1.0],
+            origin,
             dimensions: [16.0, 2.0, 2.0],
-            tex_offset,
+            tex_offset: [18, 0],
             inflate: 0.0,
-            mirror: false,
+            mirror,
             skip_faces: vec![],
         }],
         pose: EntityPartPose {

@@ -81,9 +81,10 @@ pub(super) fn sign_model(wood: SignWood, is_wall: bool) -> EntityModelDef {
     }
 }
 
-/// Sign model with a custom (dynamic) texture path and 4x upscaled texture_size.
-/// Used when text is composited onto the sign texture — the tex_offsets are scaled 4x
-/// so that UVs map to the same normalized positions on the larger texture.
+/// Sign model with a custom (dynamic) texture path. The composited texture image
+/// itself is 4x upscaled (256x128) to fit readable text, but we keep `texture_size`
+/// at the base [64, 32] so UV normalization matches MC's tex_offset layout —
+/// normalized UVs then sample the full 256x128 image, including the text region.
 pub(crate) fn sign_model_upscaled(custom_texture: &str, is_wall: bool) -> EntityModelDef {
     let (pos_x, pos_y, pos_z) = if is_wall {
         (8.0, 3.0, 15.0)
@@ -92,7 +93,6 @@ pub(crate) fn sign_model_upscaled(custom_texture: &str, is_wall: bool) -> Entity
     };
     let scale = 2.0 / 3.0;
 
-    // Board with 4x tex_offset: [0,0] → [0,0] (still zero)
     let board = EntityPart {
         cubes: vec![EntityCube {
             origin: [-12.0, -14.0, -1.0],
@@ -113,12 +113,11 @@ pub(crate) fn sign_model_upscaled(custom_texture: &str, is_wall: bool) -> Entity
     let mut parts = vec![board];
 
     if !is_wall {
-        // Stick: tex_offset [0,14] → [0,56] at 4x
         let stick = EntityPart {
             cubes: vec![EntityCube {
                 origin: [-1.0, -2.0, -1.0],
                 dimensions: [2.0, 14.0, 2.0],
-                tex_offset: [0, 14 * 4],
+                tex_offset: [0, 14],
                 inflate: 0.0,
                 mirror: false,
                 skip_faces: vec![],
@@ -135,7 +134,7 @@ pub(crate) fn sign_model_upscaled(custom_texture: &str, is_wall: bool) -> Entity
 
     EntityModelDef {
         texture_path: custom_texture.to_string(),
-        texture_size: [64 * 4, 32 * 4],
+        texture_size: [64, 32],
         parts,
         is_opaque: true,
     }

@@ -56,48 +56,53 @@ pub(crate) fn generate_decorated_pot_geometry(
     let mut indices = Vec::new();
     let mut face_textures = Vec::new();
 
-    // Build facing rotation (pot faces toward the player, like other entities)
-    let facing_angle = super::facing_rotation_rad(facing);
+    // MC's DecoratedPotRenderer rotates by `180° - direction.toYRot()` around
+    // the block center. Translate to match that convention rather than our
+    // humanoid-tuned `facing_rotation_rad`.
+    let yrot_deg = match facing {
+        "south" => 180.0_f32,
+        "west"  => 90.0_f32,
+        "north" => 0.0_f32,
+        "east"  => 270.0_f32,
+        _       => 0.0_f32,
+    };
     let facing_mat = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
-        * Mat4::from_rotation_y(facing_angle)
+        * Mat4::from_rotation_y(yrot_deg.to_radians())
         * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5));
 
-    // The pot body occupies roughly the center of the block.
-    // Model coordinates are in block-local [0,1] space.
-    //
-    // Neck: top part, 6/16 wide centered, 4/16 tall at top
-    // Body: main body, 10/16 wide centered, 8/16 tall in middle
-    // Bottom: base, 6/16 wide centered, 4/16 tall at bottom
-
-    // Simplified pot geometry: approximate as a tapered shape using 3 box sections
-    // All in [0,1] block space
-
-    // --- Neck (top): 6x4x6 centered at top ---
-    let neck_min = [5.0 / 16.0, 12.0 / 16.0, 5.0 / 16.0];
-    let neck_max = [11.0 / 16.0, 1.0, 11.0 / 16.0];
-    add_box(
-        &mut vertices, &mut indices, &mut face_textures,
-        neck_min, neck_max, &facing_mat,
-        POT_BASE_TEXTURE, false,
-    );
-
-    // --- Body (middle): 10x8x10 centered ---
-    // North/East/South/West faces get sherd textures, top/bottom get base
-    let body_min = [3.0 / 16.0, 4.0 / 16.0, 3.0 / 16.0];
-    let body_max = [13.0 / 16.0, 12.0 / 16.0, 13.0 / 16.0];
+    // Body: a uniform 14×16×14 pot matching MC's SIDES layer, centered X/Z with
+    // a 1/16 inset from block boundaries on each horizontal side, full block
+    // height. Top/bottom faces use the base texture; the four side faces each
+    // get an individual sherd texture.
+    let body_min = [1.0 / 16.0, 0.0, 1.0 / 16.0];
+    let body_max = [15.0 / 16.0, 1.0, 15.0 / 16.0];
+    // Pot sides are opaque: the pattern (sherd) texture is composited over the
+    // base pot-side texture in element.rs::composite_pot_side before rendering.
     add_box_with_side_textures(
         &mut vertices, &mut indices, &mut face_textures,
         body_min, body_max, &facing_mat,
         &sherds, false,
     );
 
-    // --- Bottom: 6x4x6 centered at bottom ---
-    let bottom_min = [5.0 / 16.0, 0.0, 5.0 / 16.0];
-    let bottom_max = [11.0 / 16.0, 4.0 / 16.0, 11.0 / 16.0];
+    // Neck geometry from MC's NECK part. After `RotX(π) + offset(0, 37, 16)`
+    // the two cubes land at:
+    //   rim (6×1×6):        y = 16..17  — narrow collar flush with pot top
+    //   main neck (8×3×8):  y = 17..20  — wider cube above the rim
+    // Both sit slightly above the block boundary (y=16) giving the pot its
+    // stepped opening silhouette.
+    let rim_min = [5.0 / 16.0, 16.0 / 16.0, 5.0 / 16.0];
+    let rim_max = [11.0 / 16.0, 17.0 / 16.0, 11.0 / 16.0];
     add_box(
         &mut vertices, &mut indices, &mut face_textures,
-        bottom_min, bottom_max, &facing_mat,
-        POT_BASE_TEXTURE, false,
+        rim_min, rim_max, &facing_mat,
+        POT_SIDE_TEXTURE, false,
+    );
+    let neck_min = [4.0 / 16.0, 17.0 / 16.0, 4.0 / 16.0];
+    let neck_max = [12.0 / 16.0, 20.0 / 16.0, 12.0 / 16.0];
+    add_box(
+        &mut vertices, &mut indices, &mut face_textures,
+        neck_min, neck_max, &facing_mat,
+        POT_SIDE_TEXTURE, false,
     );
 
     (vertices, indices, face_textures)
@@ -151,10 +156,13 @@ fn add_box_with_side_textures(
     let corners = box_corners(min, max);
     let transformed = transform_corners(&corners, facing_mat);
 
-    // Faces: (corner_indices, normal, texture)
+    // Faces: (corner_indices, normal, texture). Top/bottom use the plain side
+    // texture rather than the base texture — the base is a 32x32 atlas with
+    // non-trivial UVs that don't map cleanly across a full face, and MC's
+    // pot top/bottom faces are near-uniform terracotta anyway.
     let face_defs: [([usize; 4], [f32; 3], &str); 6] = [
-        ([4, 5, 1, 0], [0.0, -1.0, 0.0], POT_BASE_TEXTURE),  // Down
-        ([3, 2, 6, 7], [0.0, 1.0, 0.0], POT_BASE_TEXTURE),   // Up
+        ([4, 5, 1, 0], [0.0, -1.0, 0.0], POT_SIDE_TEXTURE),   // Down
+        ([3, 2, 6, 7], [0.0, 1.0, 0.0], POT_SIDE_TEXTURE),    // Up
         ([1, 0, 3, 2], [0.0, 0.0, -1.0], &sherds[0]),         // North
         ([4, 5, 6, 7], [0.0, 0.0, 1.0], &sherds[2]),          // South
         ([0, 4, 7, 3], [-1.0, 0.0, 0.0], &sherds[3]),         // West
@@ -208,8 +216,21 @@ fn add_quad(
     let n_vec = Vec3::new(n4.x, n4.y, n4.z).normalize_or_zero();
     let n = [n_vec.x, n_vec.y, n_vec.z];
 
-    // Simple UVs covering full texture
-    let uvs = [[1.0, 0.0], [0.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
+    // UVs covering the full texture, rotated 180° from the straightforward
+    // mapping so the pattern shows right-side up (our vertex order assigns the
+    // "top-left of face" to the 4th corner, not the 1st).
+    //
+    // Inset by 1/16 on the left — MC's pot side uses `texOffs(1, 0)` on a
+    // 14-wide box, sampling pixels 1..15 of the 16-wide texture, because the
+    // pattern PNGs have a 1-pixel black/transparent margin at column 0.
+    // Without this inset that margin shows as a black edge at the pot corner.
+    const INSET: f32 = 1.0 / 16.0;
+    let uvs = [
+        [INSET, 1.0],
+        [1.0 - INSET, 1.0],
+        [1.0 - INSET, 0.0],
+        [INSET, 0.0],
+    ];
 
     let v_start = vertices.len() as u32;
 
@@ -276,7 +297,7 @@ mod tests {
             .with_property("facing", "north");
         let (verts, indices, faces) = generate_decorated_pot_geometry(&block);
 
-        // 3 boxes: neck(6 faces) + body(6 faces) + bottom(6 faces) = 18 faces
+        // 3 boxes: body + neck + rim = 18 faces
         assert_eq!(faces.len(), 18);
         assert_eq!(verts.len(), 18 * 4);
         assert_eq!(indices.len(), 18 * 6);
@@ -289,13 +310,9 @@ mod tests {
             .with_property("sherds", "angler,arms_up,blade,brewer");
         let (_, _, faces) = generate_decorated_pot_geometry(&block);
 
-        // Check that body faces (indices 6-11) have appropriate textures
-        // Body is the second box, so faces 6-11
-        // Face 6 = Down (base), Face 7 = Up (base),
-        // Face 8 = North (sherd 0), Face 9 = South (sherd 2),
-        // Face 10 = West (sherd 3), Face 11 = East (sherd 1)
-        assert_eq!(faces[6].texture, POT_BASE_TEXTURE); // Down
-        assert_eq!(faces[7].texture, POT_BASE_TEXTURE); // Up
+        // Body is the first box (0-5): Down, Up (side), North/South/West/East (sherds)
+        assert_eq!(faces[0].texture, POT_SIDE_TEXTURE); // Down
+        assert_eq!(faces[1].texture, POT_SIDE_TEXTURE); // Up
     }
 
     #[test]

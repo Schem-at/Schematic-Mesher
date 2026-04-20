@@ -26,7 +26,7 @@ mod item_frame;
 pub(crate) mod inventory;
 pub mod item_render;
 mod minecart;
-mod mob;
+pub(crate) mod mob;
 pub(crate) mod particle;
 pub(crate) mod player;
 pub(crate) mod sheep;
@@ -34,6 +34,9 @@ mod shulker;
 pub(crate) mod sign;
 pub(crate) mod sign_text;
 pub(crate) mod skull;
+pub(crate) mod villager_texture;
+pub(crate) mod boat;
+pub(crate) mod equipment;
 mod slime;
 mod spider;
 mod villager;
@@ -175,6 +178,8 @@ pub enum MobType {
     IronGolem,
     Bat,
     Player,
+    Boat,
+    ChestBoat,
 }
 
 /// Face texture info for a generated entity face.
@@ -315,6 +320,24 @@ pub fn detect_block_entity(block: &InputBlock) -> Option<BlockEntityType> {
 }
 
 /// Detect if a block is a mob entity (custom `entity:` namespace convention).
+/// World-space offset where a rider sits on this mob/vehicle, approximated from
+/// MC's `Entity.getPassengerRidingPosition`. Returned in block units.
+pub fn rider_offset(mob_type: MobType) -> [f32; 3] {
+    // Y values approximate MC's seat-height per host mob, calibrated so the
+    // rider's feet land on the mob's back/saddle/seat after our `pos.y - 0.5`
+    // block-to-world shift. Smaller than MC's raw getPassengerRidingPosition
+    // numbers because our root already lifts the rider into block coords.
+    match mob_type {
+        MobType::Pig => [0.0, 0.25, 0.0],
+        MobType::Horse => [0.0, 0.65, -0.05],
+        MobType::Cow | MobType::Sheep => [0.0, 0.35, 0.0],
+        MobType::Minecart => [0.0, 0.0, 0.0],
+        MobType::Boat | MobType::ChestBoat => [0.0, 0.3, 0.0],
+        MobType::Wolf => [0.0, 0.15, 0.0],
+        _ => [0.0, 0.3, 0.0],
+    }
+}
+
 pub fn detect_mob(block: &InputBlock) -> Option<MobType> {
     let block_id = block.block_id();
     match block_id {
@@ -340,6 +363,8 @@ pub fn detect_mob(block: &InputBlock) -> Option<MobType> {
         "iron_golem" => Some(MobType::IronGolem),
         "bat" => Some(MobType::Bat),
         "player" => Some(MobType::Player),
+        "boat" => Some(MobType::Boat),
+        "chest_boat" => Some(MobType::ChestBoat),
         _ => None,
     }
 }
@@ -463,36 +488,29 @@ pub fn generate_entity_geometry(
 
     // Build facing rotation matrix
     let facing_mat = if matches!(entity_type, BlockEntityType::Lectern | BlockEntityType::EnchantingTable) {
-        // Book model: scale 0.675, position on block surface, optional tilt
-        // Book geometry is centered at origin in 1/16th units, traverse_parts divides by 16.
-        // We apply: facing_rotation × translation × tilt × scale
-        let facing_angle = facing_rotation_rad(facing);
-        let scale = 0.675;
-
-        let (book_y, tilt_x) = match entity_type {
-            BlockEntityType::Lectern => {
-                // Lectern surface is at y≈14.25/16, book sits on angled surface
-                // Lectern top surface is tilted ~22.5° (PI/8)
-                (14.25 / 16.0, std::f32::consts::FRAC_PI_8)
+        // Match MC's EnchantTableRenderer / LecternRenderer poseStack exactly.
+        match entity_type {
+            BlockEntityType::EnchantingTable => {
+                // T(0.5, 0.75, 0.5) · T(0, 0.1, 0) · Rz(80°)
+                // (Y rotation is a time-based spin animation; static = 0.)
+                Mat4::from_translation(Vec3::new(0.5, 0.85, 0.5))
+                    * Mat4::from_rotation_z(80.0_f32.to_radians())
             }
             _ => {
-                // Enchanting table: book floats above at y≈12/16
-                (12.0 / 16.0, 0.0)
+                // Lectern: T(0.5, 1.0625, 0.5) · Ry(-clockwise(facing).yaw) · Rz(67.5°) · T(0, -0.125, 0)
+                let yaw_deg = match facing {
+                    "north" => 270.0_f32, // clockWise=east
+                    "south" => 90.0_f32,  // clockWise=west
+                    "east"  => 0.0_f32,   // clockWise=south
+                    "west"  => 180.0_f32, // clockWise=north
+                    _       => 0.0_f32,
+                };
+                Mat4::from_translation(Vec3::new(0.5, 1.0625, 0.5))
+                    * Mat4::from_rotation_y(-yaw_deg.to_radians())
+                    * Mat4::from_rotation_z(67.5_f32.to_radians())
+                    * Mat4::from_translation(Vec3::new(0.0, -0.125, 0.0))
             }
-        };
-
-        // Book center position in block-local space
-        let book_center = Vec3::new(0.5, book_y, 0.5);
-
-        // Build transform: facing rotation around block center, then position book, then tilt, then scale
-        let facing_rot = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
-            * Mat4::from_rotation_y(facing_angle)
-            * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5));
-
-        facing_rot
-            * Mat4::from_translation(book_center)
-            * Mat4::from_rotation_x(tilt_x)
-            * Mat4::from_scale(Vec3::splat(scale))
+        }
     } else if matches!(entity_type, BlockEntityType::ShulkerBox { .. }) {
         // Shulker boxes use 6-direction facing (up/down/north/south/east/west)
         // Rotate around full block center (0.5, 0.5, 0.5)
@@ -514,18 +532,43 @@ pub fn generate_entity_geometry(
             BlockEntityType::Sign { is_wall: false, .. } => standing_rotation_rad(block),
             BlockEntityType::HangingSign { is_wall: false, .. } => standing_rotation_rad(block),
             BlockEntityType::Skull(_) => {
-                let block_id = block.block_id();
-                if block_id.contains("wall") {
-                    facing_rotation_rad(facing)
+                // Match MC SkullBlockRenderer: world face direction is
+                // (sin(yRot_mc), 0, -cos(yRot_mc)). Our model's face is on +Z local,
+                // so we need α = π - yRot_mc to produce the same world direction.
+                let yrot_mc = if block.block_id().contains("wall") {
+                    // Wall skulls rotate by the opposite of `facing`.
+                    match facing {
+                        "south" => std::f32::consts::PI,
+                        "north" => 0.0,
+                        "east" => std::f32::consts::FRAC_PI_2,
+                        "west" => -std::f32::consts::FRAC_PI_2,
+                        _ => 0.0,
+                    }
                 } else {
                     standing_rotation_rad(block)
-                }
+                };
+                std::f32::consts::PI - yrot_mc
             }
             _ => facing_rotation_rad(facing),
         };
-        Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+        let base = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
             * Mat4::from_rotation_y(facing_angle)
-            * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5))
+            * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5));
+
+        // Wall skulls: MC renders at (0.5 - stepX*0.25, 0.25, 0.5 - stepZ*0.25).
+        // The wall is on the -facing side; skull face points in +facing direction.
+        if matches!(entity_type, BlockEntityType::Skull(_)) && block.block_id().contains("wall") {
+            let (dx, dz) = match facing {
+                "south" => (0.0, -0.25),
+                "north" => (0.0, 0.25),
+                "east" => (-0.25, 0.0),
+                "west" => (0.25, 0.0),
+                _ => (0.0, 0.0),
+            };
+            Mat4::from_translation(Vec3::new(dx, 0.25, dz)) * base
+        } else {
+            base
+        }
     };
 
     traverse_parts(
@@ -569,10 +612,29 @@ pub fn generate_mob_geometry(
     let mut indices = Vec::new();
     let mut face_textures = Vec::new();
 
-    // Build facing rotation matrix (rotate around block center 0.5, 0, 0.5)
-    let facing_mat = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
-        * Mat4::from_rotation_y(facing_angle)
-        * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5));
+    // Boats have a unique render transform per AbstractBoatRenderer:
+    //   T(0, 0.375, 0) · Ry(180° - yRot) · S(-1,-1,1) · Ry(90°)
+    // No RotX(π)+T(8,24,8) root wrapper is needed — the model already renders
+    // upright under this chain.
+    let facing_mat = if matches!(mob_type, MobType::Boat | MobType::ChestBoat) {
+        let yrot_deg = match facing {
+            "south" => 0.0_f32,
+            "west" => 90.0_f32,
+            "north" => 180.0_f32,
+            "east" => 270.0_f32,
+            _ => 0.0_f32,
+        };
+        Mat4::from_translation(Vec3::new(0.5, 0.375, 0.5))
+            * Mat4::from_rotation_y((180.0_f32 - yrot_deg).to_radians())
+            * Mat4::from_scale(Vec3::new(-1.0, -1.0, 1.0))
+            * Mat4::from_rotation_y(90.0_f32.to_radians())
+    } else {
+        // Standard mobs use their root wrapper for Y-down→Y-up; this matrix
+        // just rotates the model around the block center for facing.
+        Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+            * Mat4::from_rotation_y(facing_angle)
+            * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5))
+    };
 
     traverse_parts(
         &model.parts,
