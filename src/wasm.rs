@@ -655,6 +655,7 @@ impl ChunkMeshIteratorWrapper {
             cutout: crate::mesh_output::MeshLayer::new(),
             transparent: crate::mesh_output::MeshLayer::new(),
             atlas: crate::atlas::TextureAtlas::empty(),
+            greedy_materials: Vec::new(),
             animated_textures: Vec::new(),
             bounds: crate::BoundingBox::new([0.0; 3], [0.0; 3]),
             chunk_coord: None,

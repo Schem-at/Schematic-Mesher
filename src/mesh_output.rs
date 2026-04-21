@@ -123,6 +123,32 @@ fn cast_slice<T: Copy>(slice: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(ptr, len) }
 }
 
+/// A greedy-merged material: geometry that uses its own texture (not the
+/// atlas) so tiled UVs `[0..w, 0..h]` can wrap cleanly via a REPEAT sampler.
+///
+/// Exporters emit one primitive + one texture + one material per
+/// `GreedyMaterialOutput`. Collapsing these into the shared-atlas opaque
+/// layer would apply the tile UVs to the atlas sampler, smearing the full
+/// atlas across each merged face — the bug fix this type exists to prevent.
+#[derive(Debug, Clone)]
+pub struct GreedyMaterialOutput {
+    /// Resource-pack texture path (e.g. `"block/stone"`).
+    pub texture_path: String,
+    /// Opaque geometry using this texture. UVs are tile-space `[0..w, 0..h]`.
+    pub opaque: MeshLayer,
+    /// Transparent geometry using this texture. UVs are tile-space.
+    pub transparent: MeshLayer,
+    /// PNG-encoded texture data for this material (atlas NOT applied).
+    pub texture_png: Vec<u8>,
+}
+
+impl GreedyMaterialOutput {
+    /// `true` if neither the opaque nor transparent layer has any geometry.
+    pub fn is_empty(&self) -> bool {
+        self.opaque.is_empty() && self.transparent.is_empty()
+    }
+}
+
 /// The canonical mesh output from the mesher.
 ///
 /// Contains three transparency layers (opaque, cutout, transparent), the texture atlas,
@@ -136,8 +162,12 @@ pub struct MeshOutput {
     pub cutout: MeshLayer,
     /// Alpha-blend geometry (glass, water — rendered last, no depth write).
     pub transparent: MeshLayer,
-    /// The texture atlas shared by all layers.
+    /// The texture atlas shared by the `opaque` / `cutout` / `transparent` layers.
     pub atlas: TextureAtlas,
+    /// Greedy-merged materials — one per unique `(texture_path, AO pattern)`
+    /// in the source geometry. Each has its own texture and tile-space UVs;
+    /// exporters must render them as separate primitives with REPEAT sampling.
+    pub greedy_materials: Vec<GreedyMaterialOutput>,
     /// Animated texture metadata for viewer-side frame cycling.
     pub animated_textures: Vec<AnimatedTextureExport>,
     /// Axis-aligned bounding box of the meshed region.
@@ -202,13 +232,26 @@ impl MeshOutput {
 
     /// Convert back to the internal `MesherOutput` for use with existing exporters.
     fn to_mesher_output(&self) -> crate::mesher::MesherOutput {
+        use crate::mesher::element::GreedyMaterial;
+
+        let greedy_materials = self
+            .greedy_materials
+            .iter()
+            .map(|gm| GreedyMaterial {
+                texture_path: gm.texture_path.clone(),
+                opaque_mesh: layer_to_mesh(&gm.opaque),
+                transparent_mesh: layer_to_mesh(&gm.transparent),
+                texture_png: gm.texture_png.clone(),
+            })
+            .collect();
+
         crate::mesher::MesherOutput {
             opaque_mesh: layer_to_mesh(&self.opaque),
             cutout_mesh: layer_to_mesh(&self.cutout),
             transparent_mesh: layer_to_mesh(&self.transparent),
             atlas: self.atlas.clone(),
             bounds: self.bounds,
-            greedy_materials: Vec::new(),
+            greedy_materials,
             animated_textures: self.animated_textures.clone(),
         }
     }
@@ -252,27 +295,29 @@ pub(crate) fn mesh_to_layer(mesh: &crate::mesher::geometry::Mesh) -> MeshLayer {
 impl From<&crate::mesher::MesherOutput> for MeshOutput {
     /// Convert from the internal [`MesherOutput`] to the canonical [`MeshOutput`].
     ///
-    /// Greedy material meshes are merged into the appropriate layers (opaque/transparent).
+    /// Greedy materials are preserved as dedicated [`GreedyMaterialOutput`]
+    /// entries — they are *not* merged into the atlas-shared layers. Their
+    /// tile-space UVs only render correctly against their own per-material
+    /// texture with a REPEAT sampler; merging them into the opaque layer
+    /// would smear the full atlas across every merged face.
     fn from(output: &crate::mesher::MesherOutput) -> Self {
-        let mut opaque = mesh_to_layer(&output.opaque_mesh);
-        let cutout = mesh_to_layer(&output.cutout_mesh);
-        let mut transparent = mesh_to_layer(&output.transparent_mesh);
-
-        // Merge greedy material meshes into the appropriate layers
-        for gm in &output.greedy_materials {
-            if !gm.opaque_mesh.is_empty() {
-                opaque.merge(&mesh_to_layer(&gm.opaque_mesh));
-            }
-            if !gm.transparent_mesh.is_empty() {
-                transparent.merge(&mesh_to_layer(&gm.transparent_mesh));
-            }
-        }
+        let greedy_materials = output
+            .greedy_materials
+            .iter()
+            .map(|gm| GreedyMaterialOutput {
+                texture_path: gm.texture_path.clone(),
+                opaque: mesh_to_layer(&gm.opaque_mesh),
+                transparent: mesh_to_layer(&gm.transparent_mesh),
+                texture_png: gm.texture_png.clone(),
+            })
+            .collect();
 
         MeshOutput {
-            opaque,
-            cutout,
-            transparent,
+            opaque: mesh_to_layer(&output.opaque_mesh),
+            cutout: mesh_to_layer(&output.cutout_mesh),
+            transparent: mesh_to_layer(&output.transparent_mesh),
             atlas: output.atlas.clone(),
+            greedy_materials,
             animated_textures: output.animated_textures.clone(),
             bounds: output.bounds,
             chunk_coord: None,
@@ -356,6 +401,7 @@ mod tests {
             cutout,
             transparent,
             atlas: TextureAtlas::empty(),
+            greedy_materials: Vec::new(),
             animated_textures: Vec::new(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [3.0, 1.0, 1.0]),
             chunk_coord: None,
@@ -379,6 +425,7 @@ mod tests {
             cutout: MeshLayer::new(),
             transparent: MeshLayer::new(),
             atlas: TextureAtlas::empty(),
+            greedy_materials: Vec::new(),
             animated_textures: Vec::new(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
             chunk_coord: None,
@@ -413,5 +460,126 @@ mod tests {
         let glb = output.to_glb().unwrap();
         assert!(!glb.is_empty());
         assert_eq!(&glb[0..4], b"glTF");
+    }
+
+    /// Build a minimal `MesherOutput` that contains one greedy material with
+    /// tiled UVs spanning `(0..w, 0..h)`. Used by the regression tests below.
+    fn build_mesher_output_with_greedy(w: f32, h: f32) -> crate::mesher::MesherOutput {
+        use crate::mesher::element::GreedyMaterial;
+        use crate::mesher::geometry::{Mesh, Vertex};
+
+        // Greedy quad: tile UVs (0,0)..(w,h), texture = "block/stone"
+        let mut greedy_mesh = Mesh::new();
+        let g0 = greedy_mesh.add_vertex(Vertex::new([0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0]));
+        let g1 = greedy_mesh.add_vertex(Vertex::new([w, 0.0, 0.0], [0.0, 1.0, 0.0], [w, 0.0]));
+        let g2 = greedy_mesh.add_vertex(Vertex::new([w, 0.0, h], [0.0, 1.0, 0.0], [w, h]));
+        let g3 = greedy_mesh.add_vertex(Vertex::new([0.0, 0.0, h], [0.0, 1.0, 0.0], [0.0, h]));
+        greedy_mesh.add_quad(g0, g1, g2, g3);
+
+        // Non-greedy atlas-space quad: UVs inside (0..1, 0..1)
+        let mut opaque_mesh = Mesh::new();
+        let a0 = opaque_mesh.add_vertex(Vertex::new([10.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.1, 0.1]));
+        let a1 = opaque_mesh.add_vertex(Vertex::new([11.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.2, 0.1]));
+        let a2 = opaque_mesh.add_vertex(Vertex::new([11.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.2, 0.2]));
+        let a3 = opaque_mesh.add_vertex(Vertex::new([10.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.1, 0.2]));
+        opaque_mesh.add_quad(a0, a1, a2, a3);
+
+        let greedy = GreedyMaterial {
+            texture_path: "block/stone".to_string(),
+            opaque_mesh: greedy_mesh,
+            transparent_mesh: Mesh::new(),
+            texture_png: vec![0u8; 32], // non-empty marker; content doesn't matter for UV tests
+        };
+
+        crate::mesher::MesherOutput {
+            opaque_mesh,
+            cutout_mesh: Mesh::new(),
+            transparent_mesh: Mesh::new(),
+            atlas: TextureAtlas::empty(),
+            bounds: BoundingBox::new([0.0, 0.0, 0.0], [11.0, 0.0, h.max(1.0)]),
+            greedy_materials: vec![greedy],
+            animated_textures: Vec::new(),
+        }
+    }
+
+    /// Regression: `From<&MesherOutput>` must NOT merge greedy-material meshes
+    /// (which carry tile-space UVs `[0..w, 0..h]`) into the opaque layer. The
+    /// opaque layer is shared with the atlas texture, and tile UVs applied to
+    /// an atlas sampler produce the "full atlas smeared across the face"
+    /// artefact seen in production GLBs.
+    #[test]
+    fn greedy_tile_uvs_do_not_leak_into_opaque_layer() {
+        let mesher_output = build_mesher_output_with_greedy(5.0, 3.0);
+        let output = MeshOutput::from(&mesher_output);
+
+        for &[u, v] in &output.opaque.uvs {
+            assert!(
+                u <= 1.0 && v <= 1.0,
+                "greedy tile UV ({u}, {v}) leaked into opaque atlas layer"
+            );
+        }
+    }
+
+    /// Regression: `MeshOutput` must preserve the greedy_materials across
+    /// `From<&MesherOutput>` so the GLB exporter can emit a per-material
+    /// primitive (with its own texture and REPEAT sampler) instead of
+    /// collapsing greedy geometry into the atlas layer.
+    #[test]
+    fn greedy_materials_survive_meshoutput_from() {
+        let mesher_output = build_mesher_output_with_greedy(2.0, 2.0);
+        let output = MeshOutput::from(&mesher_output);
+
+        assert_eq!(
+            output.greedy_materials.len(),
+            1,
+            "greedy_materials lost when converting MesherOutput → MeshOutput"
+        );
+        assert_eq!(output.greedy_materials[0].texture_path, "block/stone");
+    }
+
+    /// Regression: round-tripping through `to_mesher_output` must retain
+    /// greedy_materials so `to_glb()` (and all the other export helpers)
+    /// produce GLBs with per-greedy primitives.
+    #[test]
+    fn greedy_materials_survive_mesher_output_roundtrip() {
+        let mesher_output = build_mesher_output_with_greedy(2.0, 2.0);
+        let output = MeshOutput::from(&mesher_output);
+        let roundtripped = output.to_mesher_output();
+
+        assert_eq!(
+            roundtripped.greedy_materials.len(),
+            1,
+            "greedy_materials wiped by MeshOutput::to_mesher_output roundtrip"
+        );
+        assert_eq!(
+            roundtripped.greedy_materials[0].texture_path,
+            "block/stone"
+        );
+    }
+
+    /// Regression: the GLB produced via `MeshOutput::to_glb` must contain
+    /// at least one primitive PER greedy material (plus whatever atlas
+    /// primitives are needed). A GLB with only the atlas primitive means
+    /// greedy geometry got merged into the atlas layer — the bug we fixed.
+    #[test]
+    fn to_glb_emits_separate_primitive_for_each_greedy_material() {
+        let mesher_output = build_mesher_output_with_greedy(2.0, 2.0);
+        let output = MeshOutput::from(&mesher_output);
+        let glb = output.to_glb().expect("export glb");
+
+        // Parse the GLB JSON chunk to count primitives.
+        let json_len =
+            u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let json_bytes = &glb[20..20 + json_len];
+        let root: serde_json::Value =
+            serde_json::from_slice(json_bytes).expect("parse glb json");
+        let prims = root["meshes"][0]["primitives"]
+            .as_array()
+            .expect("primitives array");
+        assert!(
+            prims.len() >= 2,
+            "expected ≥2 primitives (atlas + greedy), got {}",
+            prims.len()
+        );
     }
 }

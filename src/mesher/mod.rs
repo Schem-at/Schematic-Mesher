@@ -494,6 +494,7 @@ impl<'s, S: BlockSource> Iterator for ChunkIter<'s, S> {
                 cutout: crate::mesh_output::MeshLayer::new(),
                 transparent: crate::mesh_output::MeshLayer::new(),
                 atlas: crate::atlas::TextureAtlas::empty(),
+                greedy_materials: Vec::new(),
                 animated_textures: Vec::new(),
                 bounds: chunk_bounds,
                 chunk_coord: Some((cx, cy, cz)),
