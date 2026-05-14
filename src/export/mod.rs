@@ -29,11 +29,13 @@
 //! ```
 
 pub mod gltf;
+pub mod gltf_animated;
 pub mod obj;
 pub mod raw;
 pub mod usd;
 
 pub use gltf::export_glb;
+pub use gltf_animated::{export_animated_glb, AnimatedPiece};
 pub use obj::{export_obj, ObjExport};
 pub use raw::{export_raw, RawMeshData};
 pub use usd::{export_usda, export_usdz, UsdaExport, UsdTexture};
