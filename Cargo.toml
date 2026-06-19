@@ -44,6 +44,9 @@ gltf-json = { version = "1.4", features = ["extras"] }
 # Math utilities
 glam = "0.27"
 
+# Fast non-cryptographic hashing for the hot per-block maps (BlockPosition keys).
+rustc-hash = "2"
+
 # CLI (optional)
 clap = { version = "4.5", features = ["derive"], optional = true }
 
@@ -51,6 +54,11 @@ clap = { version = "4.5", features = ["derive"], optional = true }
 wasm-bindgen = { version = "=0.2.99", optional = true }
 js-sys = { version = "=0.3.76", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
+
+# Data-parallel meshing (native only — wasm has no threads). The mesher falls
+# back to a sequential loop when this isn't present (see mesher::mesh_blocks_internal).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1"
 
 [dev-dependencies]
 tempfile = "3.0"

@@ -16,6 +16,10 @@ pub mod entity;
 pub mod face_culler;
 pub mod greedy;
 pub mod lighting;
+
+/// Minimum block count before the per-block meshing loop is parallelized across
+/// rayon threads. Below this, the fan-out/merge overhead isn't worth it.
+const PARALLEL_BLOCK_THRESHOLD: usize = 50_000;
 pub mod liquid;
 pub mod tint;
 
@@ -26,6 +30,22 @@ use crate::atlas::TextureAtlas;
 use crate::error::Result;
 use crate::resource_pack::ResourcePack;
 use crate::types::{BlockPosition, BlockSource, BoundingBox, InputBlock};
+
+/// Wasm-safe profiling clock. `std::time::Instant::now()` panics on
+/// `wasm32-unknown-unknown` ("time not implemented on this platform"), so return
+/// `None` there. Profiling output is gated on `MESHER_PROFILE`, which is never set
+/// on wasm (`std::env::var` returns `Err`), so this is a pure no-op there.
+#[inline]
+pub(crate) fn prof_now() -> Option<std::time::Instant> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(std::time::Instant::now())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+}
 
 /// Main mesher configuration.
 #[derive(Debug, Clone)]
@@ -123,14 +143,15 @@ pub struct AnimatedTextureExport {
 /// Output from the mesher.
 #[derive(Debug)]
 pub struct MesherOutput {
-    /// The opaque geometry mesh (rendered first, backface culled).
-    pub opaque_mesh: Mesh,
-    /// Binary-alpha geometry mesh (rendered second, alpha-tested, writes depth).
+    /// The opaque geometry layer (rendered first, backface culled). SoA layout —
+    /// the transparency split writes here directly, no AoS `Mesh` intermediate.
+    pub opaque_mesh: crate::mesh_output::MeshLayer,
+    /// Binary-alpha geometry layer (rendered second, alpha-tested, writes depth).
     /// Used for fire, flowers, leaves, etc. where pixels are fully opaque or fully transparent.
-    pub cutout_mesh: Mesh,
-    /// The semi-transparent geometry mesh (rendered last, alpha-blended, no depth write).
+    pub cutout_mesh: crate::mesh_output::MeshLayer,
+    /// The semi-transparent geometry layer (rendered last, alpha-blended, no depth write).
     /// Used for water, ice, stained glass, etc.
-    pub transparent_mesh: Mesh,
+    pub transparent_mesh: crate::mesh_output::MeshLayer,
     /// The texture atlas.
     pub atlas: TextureAtlas,
     /// Bounding box of the mesh.
@@ -146,9 +167,10 @@ impl MesherOutput {
     /// Note: For correct transparency, use opaque_mesh, cutout_mesh, and transparent_mesh separately.
     /// Includes greedy material meshes.
     pub fn mesh(&self) -> Mesh {
-        let mut combined = self.opaque_mesh.clone();
-        combined.merge(&self.cutout_mesh);
-        combined.merge(&self.transparent_mesh);
+        use crate::mesh_output::layer_to_internal_mesh;
+        let mut combined = layer_to_internal_mesh(&self.opaque_mesh);
+        combined.merge(&layer_to_internal_mesh(&self.cutout_mesh));
+        combined.merge(&layer_to_internal_mesh(&self.transparent_mesh));
         for gm in &self.greedy_materials {
             combined.merge(&gm.opaque_mesh);
             combined.merge(&gm.transparent_mesh);
@@ -239,22 +261,70 @@ impl Mesher {
         blocks: impl Iterator<Item = (BlockPosition, &'a InputBlock)>,
         bounds: BoundingBox,
     ) -> Result<MesherOutput> {
-        // Collect blocks for face culling
-        let blocks: Vec<_> = blocks.collect();
+        let _prof = std::env::var("MESHER_PROFILE").is_ok();
+        macro_rules! phase {
+            ($t:expr, $label:expr) => {
+                if _prof {
+                    if let Some(t) = $t {
+                        eprintln!("MPROFILE\t{}\t{}", $label, t.elapsed().as_micros());
+                    }
+                }
+            };
+        }
 
-        // Build block map for neighbor lookups (used by liquid geometry)
-        let block_map: std::collections::HashMap<BlockPosition, &InputBlock> =
-            blocks.iter().map(|(pos, block)| (*pos, *block)).collect();
+        // Collect blocks for face culling
+        let tc = prof_now();
+        let blocks: Vec<_> = blocks.collect();
+        phase!(tc, "  collect_vec");
+        // NOTE: meshing order = the source's iteration order. The whole-schematic
+        // source (VecBlockSource) yields blocks in deterministic volume-scan order
+        // (spatially coherent, x-fastest), so the output is reproducible *and*
+        // cache-friendly without an explicit sort here.
+
+        // The neighbour map is consulted ONLY for liquid/waterlogged neighbour
+        // lookups (opacity uses the FaceCuller grid, not this map). Non-liquid
+        // neighbours simply aren't found → treated as "no fluid" either way, so we
+        // build the map from ONLY the liquid/waterlogged blocks. That's typically a
+        // tiny fraction, vs a million-entry map of every block (pure waste for, say,
+        // a small pond). Empty → None (the liquid-free common case).
+        let tbm = prof_now();
+        let is_liquid_block = |b: &InputBlock| {
+            liquid::FluidState::from_block(b).is_some() || liquid::is_waterlogged(b)
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let liquid_blocks: Vec<(BlockPosition, &InputBlock)> = {
+            use rayon::prelude::*;
+            blocks
+                .par_iter()
+                .filter_map(|entry| is_liquid_block(entry.1).then_some((entry.0, entry.1)))
+                .collect()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let liquid_blocks: Vec<(BlockPosition, &InputBlock)> = blocks
+            .iter()
+            .filter_map(|entry| is_liquid_block(entry.1).then_some((entry.0, entry.1)))
+            .collect();
+        let block_map: Option<rustc_hash::FxHashMap<BlockPosition, &InputBlock>> =
+            if liquid_blocks.is_empty() {
+                None
+            } else {
+                Some(liquid_blocks.into_iter().collect())
+            };
+        phase!(tbm, "  block_map");
+        phase!(tc, "collect+block_map");
 
         // Build occupancy map for face culling if enabled
         // Uses model data to determine which blocks are full opaque cubes
+        let tcull = prof_now();
         let culler = if self.config.cull_hidden_faces {
             Some(face_culler::FaceCuller::new(&self.resource_pack, &blocks))
         } else {
             None
         };
+        phase!(tcull, "FaceCuller::new");
 
         // Build light map if lighting is enabled
+        let tlight = prof_now();
         let lighting_config = lighting::LightingConfig {
             enable_block_light: self.config.enable_block_light,
             enable_sky_light: self.config.enable_sky_light,
@@ -266,35 +336,113 @@ impl Mesher {
         } else {
             None
         };
+        phase!(tlight, "LightMap::compute");
 
         let mut mesh_builder = element::MeshBuilder::new(
             &self.resource_pack,
             &self.config,
             culler.as_ref(),
-            Some(&block_map),
+            block_map.as_ref(),
             light_map.as_ref(),
         );
 
-        // Process each block
-        for (pos, block) in &blocks {
-            if !self.config.include_air && block.is_air() {
-                continue;
-            }
+        // Process each block. When greedy meshing is disabled (the default),
+        // each block's geometry is independent, so the loop fans out across
+        // rayon worker threads: every chunk builds its own MeshBuilder and the
+        // per-chunk partials are merged deterministically afterwards. Greedy
+        // meshing, wasm (no threads), and small inputs fall back to sequential.
+        let tadd = prof_now();
+        let mut partials: Option<Vec<element::PartialMesh>> = None;
 
-            // Skip blocks that are fully occluded by opaque neighbors
-            if self.config.cull_occluded_blocks {
-                if let Some(ref culler) = culler {
-                    if culler.is_fully_occluded(*pos) {
-                        continue;
-                    }
-                }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if blocks.len() >= PARALLEL_BLOCK_THRESHOLD {
+                use rayon::prelude::*;
+                let threads = rayon::current_num_threads().max(1);
+                let chunk_size = (blocks.len() / (threads * 4)).max(1024);
+                let ps = blocks
+                    .par_chunks(chunk_size)
+                    .map(|chunk| -> Result<element::PartialMesh> {
+                        let mut mb = element::MeshBuilder::new(
+                            &self.resource_pack,
+                            &self.config,
+                            culler.as_ref(),
+                            block_map.as_ref(),
+                            light_map.as_ref(),
+                        );
+                        for (pos, block) in chunk {
+                            if !self.config.include_air && block.is_air() {
+                                continue;
+                            }
+                            if self.config.cull_occluded_blocks {
+                                if let Some(ref culler) = culler {
+                                    if culler.is_fully_occluded(*pos) {
+                                        continue;
+                                    }
+                                }
+                            }
+                            mb.add_block(*pos, block)?;
+                        }
+                        // Merge this chunk's greedy faces into its own mesh before
+                        // extracting the partial (greedy merges within a chunk only).
+                        mb.emit_greedy_quads();
+                        Ok(mb.into_partial())
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                partials = Some(ps);
             }
-
-            mesh_builder.add_block(*pos, block)?;
         }
 
-        // Build the final meshes and atlas
-        let (opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials, dynamic_animated) = mesh_builder.build(self.config.pre_built_atlas.clone())?;
+        if partials.is_none() {
+            for (pos, block) in &blocks {
+                if !self.config.include_air && block.is_air() {
+                    continue;
+                }
+
+                // Skip blocks that are fully occluded by opaque neighbors
+                if self.config.cull_occluded_blocks {
+                    if let Some(ref culler) = culler {
+                        if culler.is_fully_occluded(*pos) {
+                            continue;
+                        }
+                    }
+                }
+
+                mesh_builder.add_block(*pos, block)?;
+            }
+        }
+        phase!(tadd, "add_block_loop");
+
+        // Build the final meshes and atlas. The parallel path feeds the per-chunk
+        // partials straight into the layer-split (no intermediate merge copy of the
+        // full vertex buffer); the sequential path builds from the single mesh.
+        let tbuild = prof_now();
+        let (opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials, dynamic_animated) =
+            match partials {
+                Some(partials) => {
+                    mesh_builder.merge_metadata_only(&partials);
+                    mesh_builder.build_from_partials(partials, self.config.pre_built_atlas.clone())?
+                }
+                None => mesh_builder.build(self.config.pre_built_atlas.clone())?,
+            };
+        phase!(tbuild, "mesh_builder.build");
+
+        if std::env::var("MESHER_STATS").is_ok() {
+            use std::sync::atomic::Ordering::Relaxed;
+            let total = element::STAT_TOTAL_FACES.swap(0, Relaxed);
+            let cube = element::STAT_CUBE_FACES.swap(0, Relaxed);
+            let lit = element::STAT_CUBE_LIT_FACES.swap(0, Relaxed);
+            if total > 0 {
+                eprintln!(
+                    "MESHSTATS\ttotal_faces={}\tcube={} ({:.1}%)\tcube_lit={} ({:.1}%)",
+                    total,
+                    cube,
+                    100.0 * cube as f64 / total as f64,
+                    lit,
+                    100.0 * lit as f64 / total as f64,
+                );
+            }
+        }
 
         // Collect animated texture metadata for viewer-side frame cycling
         let mut animated_textures = Self::collect_animated_textures(&self.resource_pack, &atlas);
@@ -356,7 +504,7 @@ impl Mesher {
     /// resulting mesh is discarded. Use this to pre-scan blocks for a global atlas.
     pub fn discover_textures<S: BlockSource>(&self, source: &S) -> std::collections::HashSet<String> {
         let blocks: Vec<_> = source.iter_blocks().collect();
-        let block_map: std::collections::HashMap<BlockPosition, &InputBlock> =
+        let block_map: rustc_hash::FxHashMap<BlockPosition, &InputBlock> =
             blocks.iter().map(|(pos, block)| (*pos, *block)).collect();
         let culler = if self.config.cull_hidden_faces {
             Some(face_culler::FaceCuller::new(&self.resource_pack, &blocks))
@@ -397,7 +545,12 @@ impl Mesher {
     ) -> Vec<AnimatedTextureExport> {
         let mut result = Vec::new();
 
-        for (texture_path, region) in &atlas.regions {
+        // Sorted iteration so animated-texture export order (and the glTF image
+        // order downstream) is deterministic — atlas.regions is a hash map.
+        let mut paths: Vec<&String> = atlas.regions.keys().collect();
+        paths.sort_unstable();
+        for texture_path in paths {
+            let region = &atlas.regions[texture_path];
             let texture = match resource_pack.get_texture(texture_path) {
                 Some(t) if t.is_animated && t.frame_count > 1 => t,
                 _ => continue,
@@ -509,7 +662,7 @@ impl<'s, S: BlockSource> Iterator for ChunkIter<'s, S> {
         );
 
         Some(result.map(|mesher_output| {
-            let mut mesh_output = crate::mesh_output::MeshOutput::from(&mesher_output);
+            let mut mesh_output = crate::mesh_output::MeshOutput::from(mesher_output);
             mesh_output.chunk_coord = Some((cx, cy, cz));
             mesh_output
         }))

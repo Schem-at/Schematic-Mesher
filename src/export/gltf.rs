@@ -52,6 +52,8 @@ fn align_buffer(buffer: &mut Vec<u8>, alignment: usize) {
 /// Separates opaque and transparent geometry into different primitives for correct rendering.
 /// Greedy-merged materials get their own textures with REPEAT wrapping for proper tiling.
 pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
+    // Main layers are SoA (MeshLayer) and the writer reads SoA directly — no AoS
+    // conversion. Greedy materials are still AoS Mesh (converted at their call).
     let opaque_mesh = &output.opaque_mesh;
     let cutout_mesh = &output.cutout_mesh;
     let transparent_mesh = &output.transparent_mesh;
@@ -105,15 +107,15 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
 
     fn write_mesh(
         buffer: &mut Vec<u8>,
-        mesh: &Mesh,
+        layer: &crate::mesh_output::MeshLayer,
         center: &[f32; 3],
         half_ext: &[f32; 3],
     ) -> Option<MeshOffsets> {
-        if mesh.is_empty() {
+        if layer.is_empty() {
             return None;
         }
 
-        let vertex_count = mesh.vertex_count();
+        let vertex_count = layer.vertex_count();
         let use_u16_indices = vertex_count <= 65535;
 
         // Positions: i16 × 3 (2 bytes each = 6 bytes/vertex)
@@ -122,8 +124,8 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         let pos_offset = buffer.len();
         let mut pos_min = [i16::MAX; 3];
         let mut pos_max = [i16::MIN; 3];
-        for v in &mesh.vertices {
-            let q = quantize_position(v.position, center, half_ext);
+        for position in &layer.positions {
+            let q = quantize_position(*position, center, half_ext);
             for i in 0..3 {
                 pos_min[i] = pos_min[i].min(q[i]);
                 pos_max[i] = pos_max[i].max(q[i]);
@@ -135,8 +137,8 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         // Align to 4 bytes (glTF requires 4-byte aligned vertex attributes)
         align_buffer(buffer, 4);
         let norm_offset = buffer.len();
-        for v in &mesh.vertices {
-            let q = quantize_normal(v.normal);
+        for normal in &layer.normals {
+            let q = quantize_normal(*normal);
             buffer.extend_from_slice(bytemuck_cast_slice(&q));
         }
 
@@ -144,16 +146,16 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         // Align to 4 bytes (f32 alignment)
         align_buffer(buffer, 4);
         let uv_offset = buffer.len();
-        for v in &mesh.vertices {
-            buffer.extend_from_slice(bytemuck_cast_slice(&v.uv));
+        for uv in &layer.uvs {
+            buffer.extend_from_slice(bytemuck_cast_slice(uv));
         }
 
         // Colors: u8 × 4 (1 byte each = 4 bytes/vertex)
         // Align to 4 bytes (glTF requires 4-byte aligned vertex attributes)
         align_buffer(buffer, 4);
         let color_offset = buffer.len();
-        for v in &mesh.vertices {
-            let q = quantize_color(v.color);
+        for color in &layer.colors {
+            let q = quantize_color(*color);
             buffer.extend_from_slice(&q);
         }
 
@@ -167,11 +169,11 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
         }
         let idx_offset = buffer.len();
         if use_u16_indices {
-            for &idx in &mesh.indices {
+            for &idx in &layer.indices {
                 buffer.extend_from_slice(&(idx as u16).to_le_bytes());
             }
         } else {
-            buffer.extend_from_slice(bytemuck_cast_slice(&mesh.indices));
+            buffer.extend_from_slice(bytemuck_cast_slice(&layer.indices));
         }
         let end = buffer.len();
 
@@ -187,7 +189,7 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
             idx_offset,
             idx_bytes: end - idx_offset,
             vertex_count,
-            index_count: mesh.indices.len(),
+            index_count: layer.indices.len(),
             pos_min,
             pos_max,
             use_u16_indices,
@@ -201,8 +203,19 @@ pub fn export_glb(output: &MesherOutput) -> Result<Vec<u8>> {
     // Write greedy material mesh data
     let mut greedy_mesh_offsets: Vec<(Option<MeshOffsets>, Option<MeshOffsets>)> = Vec::new();
     for gm in &output.greedy_materials {
-        let opaque = write_mesh(&mut buffer_data, &gm.opaque_mesh, &center, &half_ext);
-        let transparent = write_mesh(&mut buffer_data, &gm.transparent_mesh, &center, &half_ext);
+        // Greedy materials are AoS Mesh; convert to SoA for the writer (rare/small).
+        let opaque = write_mesh(
+            &mut buffer_data,
+            &crate::mesh_output::mesh_to_layer(&gm.opaque_mesh),
+            &center,
+            &half_ext,
+        );
+        let transparent = write_mesh(
+            &mut buffer_data,
+            &crate::mesh_output::mesh_to_layer(&gm.transparent_mesh),
+            &center,
+            &half_ext,
+        );
         greedy_mesh_offsets.push((opaque, transparent));
     }
 
@@ -601,17 +614,25 @@ fn calculate_bounds_all(output: &MesherOutput) -> ([f32; 3], [f32; 3]) {
     let mut min = [f32::MAX; 3];
     let mut max = [f32::MIN; 3];
 
-    let all_vertices = output.opaque_mesh.vertices.iter()
-        .chain(output.cutout_mesh.vertices.iter())
-        .chain(output.transparent_mesh.vertices.iter())
+    // Main layers are SoA (positions array); greedy materials are still AoS Mesh.
+    let all_positions = output
+        .opaque_mesh
+        .positions
+        .iter()
+        .chain(output.cutout_mesh.positions.iter())
+        .chain(output.transparent_mesh.positions.iter())
         .chain(output.greedy_materials.iter().flat_map(|gm| {
-            gm.opaque_mesh.vertices.iter().chain(gm.transparent_mesh.vertices.iter())
+            gm.opaque_mesh
+                .vertices
+                .iter()
+                .map(|v| &v.position)
+                .chain(gm.transparent_mesh.vertices.iter().map(|v| &v.position))
         }));
 
-    for vertex in all_vertices {
+    for position in all_positions {
         for i in 0..3 {
-            min[i] = min[i].min(vertex.position[i]);
-            max[i] = max[i].max(vertex.position[i]);
+            min[i] = min[i].min(position[i]);
+            max[i] = max[i].max(position[i]);
         }
     }
 

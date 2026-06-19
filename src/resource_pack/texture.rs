@@ -126,6 +126,16 @@ impl TextureData {
         self.pixels.chunks(4).any(|pixel| pixel[3] < 255)
     }
 
+    /// Check if this texture is TRANSLUCENT — has any pixel with intermediate
+    /// alpha (`0 < a < 255`). This distinguishes alpha-blended blocks (slime,
+    /// honey, stained glass, ice) from binary alpha-tested cutouts (leaves,
+    /// glass panes), whose pixels are only ever fully opaque or fully clear.
+    pub fn has_translucency(&self) -> bool {
+        self.pixels
+            .chunks(4)
+            .any(|pixel| pixel[3] > 0 && pixel[3] < 255)
+    }
+
     /// Get a pixel at (x, y).
     pub fn get_pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let idx = ((y * self.width + x) * 4) as usize;

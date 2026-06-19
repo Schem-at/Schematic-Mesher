@@ -89,7 +89,7 @@ pub fn is_waterlogged(block: &InputBlock) -> bool {
 /// Get the fluid state at a neighboring position.
 fn get_neighbor_fluid(
     pos: BlockPosition,
-    block_map: &HashMap<BlockPosition, &InputBlock>,
+    block_map: &rustc_hash::FxHashMap<BlockPosition, &InputBlock>,
 ) -> Option<FluidState> {
     block_map.get(&pos).and_then(|b| FluidState::from_block(b))
 }
@@ -98,7 +98,7 @@ fn get_neighbor_fluid(
 fn is_same_fluid(
     pos: BlockPosition,
     fluid_type: FluidType,
-    block_map: &HashMap<BlockPosition, &InputBlock>,
+    block_map: &rustc_hash::FxHashMap<BlockPosition, &InputBlock>,
 ) -> bool {
     if get_neighbor_fluid(pos, block_map)
         .map(|f| f.fluid_type == fluid_type)
@@ -122,7 +122,7 @@ fn corner_height(
     state: &FluidState,
     dx: i32,
     dz: i32,
-    block_map: &HashMap<BlockPosition, &InputBlock>,
+    block_map: &rustc_hash::FxHashMap<BlockPosition, &InputBlock>,
 ) -> f32 {
     // If there's the same fluid directly above, height is always 1.0
     let above = BlockPosition::new(pos.x, pos.y + 1, pos.z);
@@ -167,7 +167,7 @@ fn corner_height(
 pub fn corner_heights(
     pos: BlockPosition,
     state: &FluidState,
-    block_map: &HashMap<BlockPosition, &InputBlock>,
+    block_map: &rustc_hash::FxHashMap<BlockPosition, &InputBlock>,
 ) -> [f32; 4] {
     [
         corner_height(pos, state, -1, -1, block_map), // NW corner
@@ -191,7 +191,7 @@ pub fn direction_shade(direction: Direction) -> f32 {
 pub fn visible_faces(
     pos: BlockPosition,
     state: &FluidState,
-    block_map: &HashMap<BlockPosition, &InputBlock>,
+    block_map: &rustc_hash::FxHashMap<BlockPosition, &InputBlock>,
     is_opaque_fn: impl Fn(BlockPosition) -> bool,
 ) -> [bool; 6] {
     let mut faces = [true; 6]; // [down, up, north, south, west, east]
@@ -227,7 +227,7 @@ pub fn visible_faces(
 pub fn generate_fluid_geometry(
     pos: BlockPosition,
     state: &FluidState,
-    block_map: &HashMap<BlockPosition, &InputBlock>,
+    block_map: &rustc_hash::FxHashMap<BlockPosition, &InputBlock>,
     is_opaque_fn: impl Fn(BlockPosition) -> bool,
     base_color: [f32; 4],
 ) -> (Vec<Vertex>, Vec<u32>, Vec<FaceTexture>) {
@@ -465,7 +465,7 @@ mod tests {
     fn test_corner_heights_isolated_source() {
         let block = water_source();
         let pos = BlockPosition::new(0, 0, 0);
-        let mut map: HashMap<BlockPosition, &InputBlock> = HashMap::new();
+        let mut map: rustc_hash::FxHashMap<BlockPosition, &InputBlock> = rustc_hash::FxHashMap::default();
         map.insert(pos, &block);
 
         let state = FluidState::from_block(&block).unwrap();
@@ -483,7 +483,7 @@ mod tests {
         let above = water_source();
         let pos = BlockPosition::new(0, 0, 0);
         let above_pos = BlockPosition::new(0, 1, 0);
-        let mut map: HashMap<BlockPosition, &InputBlock> = HashMap::new();
+        let mut map: rustc_hash::FxHashMap<BlockPosition, &InputBlock> = rustc_hash::FxHashMap::default();
         map.insert(pos, &block);
         map.insert(above_pos, &above);
 
@@ -499,7 +499,7 @@ mod tests {
     fn test_visible_faces_isolated() {
         let block = water_source();
         let pos = BlockPosition::new(0, 0, 0);
-        let mut map: HashMap<BlockPosition, &InputBlock> = HashMap::new();
+        let mut map: rustc_hash::FxHashMap<BlockPosition, &InputBlock> = rustc_hash::FxHashMap::default();
         map.insert(pos, &block);
 
         let state = FluidState::from_block(&block).unwrap();
@@ -515,7 +515,7 @@ mod tests {
         let above = water_source();
         let pos = BlockPosition::new(0, 0, 0);
         let above_pos = BlockPosition::new(0, 1, 0);
-        let mut map: HashMap<BlockPosition, &InputBlock> = HashMap::new();
+        let mut map: rustc_hash::FxHashMap<BlockPosition, &InputBlock> = rustc_hash::FxHashMap::default();
         map.insert(pos, &block);
         map.insert(above_pos, &above);
 
@@ -530,7 +530,7 @@ mod tests {
     fn test_generate_geometry_produces_vertices() {
         let block = water_source();
         let pos = BlockPosition::new(0, 0, 0);
-        let mut map: HashMap<BlockPosition, &InputBlock> = HashMap::new();
+        let mut map: rustc_hash::FxHashMap<BlockPosition, &InputBlock> = rustc_hash::FxHashMap::default();
         map.insert(pos, &block);
 
         let state = FluidState::from_block(&block).unwrap();
@@ -580,7 +580,7 @@ mod tests {
         let water = water_source();
         let pos_water = BlockPosition::new(0, 0, 0);
         let pos_wl = BlockPosition::new(1, 0, 0);
-        let mut map: HashMap<BlockPosition, &InputBlock> = HashMap::new();
+        let mut map: rustc_hash::FxHashMap<BlockPosition, &InputBlock> = rustc_hash::FxHashMap::default();
         map.insert(pos_water, &water);
         map.insert(pos_wl, &waterlogged);
 
@@ -592,7 +592,7 @@ mod tests {
     fn test_non_waterlogged_not_same_fluid() {
         let slab = InputBlock::new("minecraft:oak_slab");
         let pos = BlockPosition::new(0, 0, 0);
-        let mut map: HashMap<BlockPosition, &InputBlock> = HashMap::new();
+        let mut map: rustc_hash::FxHashMap<BlockPosition, &InputBlock> = rustc_hash::FxHashMap::default();
         map.insert(pos, &slab);
 
         assert!(!is_same_fluid(pos, FluidType::Water, &map));

@@ -88,9 +88,9 @@ impl MeshExporter for GlbExporter {
             // Flatten to single layer, build a temporary MesherOutput with merged mesh
             let flat = mesh.flatten();
             let internal = crate::mesher::MesherOutput {
-                opaque_mesh: crate::mesh_output::layer_to_internal_mesh(&flat),
-                cutout_mesh: crate::mesher::geometry::Mesh::new(),
-                transparent_mesh: crate::mesher::geometry::Mesh::new(),
+                opaque_mesh: flat,
+                cutout_mesh: crate::mesh_output::MeshLayer::new(),
+                transparent_mesh: crate::mesh_output::MeshLayer::new(),
                 atlas: mesh.atlas.clone(),
                 bounds: mesh.bounds,
                 greedy_materials: Vec::new(),

@@ -29,10 +29,15 @@ const CELL_EMPTY: u8 = 0;
 const CELL_OPAQUE: u8 = 1;
 const CELL_TRANSPARENT: u8 = 2;
 
+/// Minimum block count before block classification is parallelized across rayon
+/// threads in [`FaceCuller::new`].
+const FACE_CULLER_PARALLEL_THRESHOLD: usize = 50_000;
+
 /// Face culler for determining which faces should be hidden.
 pub struct FaceCuller<'a> {
     /// Map of block positions to their cull type (kept for transparent group lookups in should_cull).
-    block_types: HashMap<BlockPosition, BlockCullType>,
+    /// FxHashMap: millions of BlockPosition inserts, SipHash was a measurable hotspot.
+    block_types: rustc_hash::FxHashMap<BlockPosition, BlockCullType>,
     /// Flat 3D array for fast opacity lookups (indexed by offset from grid_min).
     grid: Vec<u8>,
     /// Minimum corner of the bounding box.
@@ -42,7 +47,7 @@ pub struct FaceCuller<'a> {
     /// Resource pack reference for model resolution.
     pack: &'a ResourcePack,
     /// Cache of block name -> cull type results.
-    cull_cache: HashMap<String, BlockCullType>,
+    cull_cache: rustc_hash::FxHashMap<String, BlockCullType>,
 }
 
 impl<'a> FaceCuller<'a> {
@@ -78,25 +83,92 @@ impl<'a> FaceCuller<'a> {
         };
 
         let mut culler = Self {
-            block_types: HashMap::new(),
+            block_types: rustc_hash::FxHashMap::default(),
             grid: vec![CELL_EMPTY; grid_size[0] * grid_size[1] * grid_size[2]],
             grid_min,
             grid_size,
             pack,
-            cull_cache: HashMap::new(),
+            cull_cache: rustc_hash::FxHashMap::default(),
         };
 
-        for (pos, block) in blocks {
-            let cull_type = culler.classify_block(block);
-            let cell = match &cull_type {
-                BlockCullType::Opaque => CELL_OPAQUE,
-                BlockCullType::Transparent(_) => CELL_TRANSPARENT,
-                BlockCullType::NonSolid => CELL_EMPTY,
-            };
-            if let Some(idx) = culler.grid_index(*pos) {
-                culler.grid[idx] = cell;
+        // Classify every block to fill the flat opacity grid. Classification
+        // (model resolution + cache-key hashing) is the expensive, independent
+        // part, so it fans out across rayon workers (each with a thread-local
+        // classify cache); only the grid write stays serial. wasm / small inputs
+        // use the sequential path.
+        //
+        // `block_types` only needs *transparent* blocks: `should_cull` consults
+        // it solely to compare transparent groups (an opaque neighbor culls via
+        // the grid before the map is touched, and a missing entry is treated like
+        // opaque). Inserting the millions of opaque blocks was the dominant cost
+        // here, so we skip them entirely.
+        #[allow(unused_mut)]
+        let mut filled_parallel = false;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if blocks.len() >= FACE_CULLER_PARALLEL_THRESHOLD {
+                use rayon::prelude::*;
+                let classified: Vec<(Option<usize>, u8, BlockPosition, BlockCullType)> = blocks
+                    .par_iter()
+                    .map_init(
+                        || {
+                            (
+                                rustc_hash::FxHashMap::<String, BlockCullType>::default(),
+                                0usize,
+                                BlockCullType::NonSolid,
+                            )
+                        },
+                        |state, (pos, block)| {
+                            // Fast path: same palette entry as the previous block
+                            // (terrain runs) → reuse its cull type, skipping the
+                            // per-block string cache key. `state` = (cache, last
+                            // block ptr, last cull type).
+                            let block_ptr = *block as *const InputBlock as usize;
+                            let cull_type = if block_ptr == state.1 {
+                                state.2.clone()
+                            } else {
+                                let t = culler.classify_block_cached(block, &mut state.0);
+                                state.1 = block_ptr;
+                                state.2 = t.clone();
+                                t
+                            };
+                            let cell = match &cull_type {
+                                BlockCullType::Opaque => CELL_OPAQUE,
+                                BlockCullType::Transparent(_) => CELL_TRANSPARENT,
+                                BlockCullType::NonSolid => CELL_EMPTY,
+                            };
+                            (culler.grid_index(*pos), cell, *pos, cull_type)
+                        },
+                    )
+                    .collect();
+                for (idx, cell, pos, cull_type) in classified {
+                    if let Some(idx) = idx {
+                        culler.grid[idx] = cell;
+                    }
+                    if matches!(cull_type, BlockCullType::Transparent(_)) {
+                        culler.block_types.insert(pos, cull_type);
+                    }
+                }
+                filled_parallel = true;
             }
-            culler.block_types.insert(*pos, cull_type);
+        }
+
+        if !filled_parallel {
+            for (pos, block) in blocks {
+                let cull_type = culler.classify_block(block);
+                let cell = match &cull_type {
+                    BlockCullType::Opaque => CELL_OPAQUE,
+                    BlockCullType::Transparent(_) => CELL_TRANSPARENT,
+                    BlockCullType::NonSolid => CELL_EMPTY,
+                };
+                if let Some(idx) = culler.grid_index(*pos) {
+                    culler.grid[idx] = cell;
+                }
+                if matches!(cull_type, BlockCullType::Transparent(_)) {
+                    culler.block_types.insert(*pos, cull_type);
+                }
+            }
         }
 
         culler
@@ -172,6 +244,26 @@ impl<'a> FaceCuller<'a> {
         // Classify the block
         let cull_type = self.resolve_and_classify(block);
         self.cull_cache.insert(key, cull_type.clone());
+        cull_type
+    }
+
+    /// Like [`classify_block`] but `&self`, using a caller-provided cache instead
+    /// of the shared `self.cull_cache`. Lets the construction loop run in parallel
+    /// (each rayon worker passes its own thread-local cache).
+    fn classify_block_cached(
+        &self,
+        block: &InputBlock,
+        cache: &mut rustc_hash::FxHashMap<String, BlockCullType>,
+    ) -> BlockCullType {
+        if block.is_air() {
+            return BlockCullType::NonSolid;
+        }
+        let key = Self::cache_key(block);
+        if let Some(cached) = cache.get(&key) {
+            return cached.clone();
+        }
+        let cull_type = self.resolve_and_classify(block);
+        cache.insert(key, cull_type.clone());
         cull_type
     }
 

@@ -104,6 +104,34 @@ impl MeshLayer {
         cast_slice(&self.indices)
     }
 
+    /// Push one vertex's attributes (SoA) and return its index. Used by the
+    /// transparency split so geometry lands directly in SoA layout — no AoS
+    /// `Vertex`/`Mesh` intermediate that would have to be converted later.
+    #[inline]
+    pub(crate) fn push_vertex(
+        &mut self,
+        position: [f32; 3],
+        normal: [f32; 3],
+        uv: [f32; 2],
+        color: [f32; 4],
+    ) -> u32 {
+        let idx = self.positions.len() as u32;
+        self.positions.push(position);
+        self.normals.push(normal);
+        self.uvs.push(uv);
+        self.colors.push(color);
+        idx
+    }
+
+    /// Reserve capacity in all attribute arrays + indices.
+    pub(crate) fn reserve(&mut self, verts: usize, indices: usize) {
+        self.positions.reserve(verts);
+        self.normals.reserve(verts);
+        self.uvs.reserve(verts);
+        self.colors.reserve(verts);
+        self.indices.reserve(indices);
+    }
+
     /// Merge another layer into this one, offsetting indices appropriately.
     pub fn merge(&mut self, other: &MeshLayer) {
         let offset = self.positions.len() as u32;
@@ -246,9 +274,9 @@ impl MeshOutput {
             .collect();
 
         crate::mesher::MesherOutput {
-            opaque_mesh: layer_to_mesh(&self.opaque),
-            cutout_mesh: layer_to_mesh(&self.cutout),
-            transparent_mesh: layer_to_mesh(&self.transparent),
+            opaque_mesh: self.opaque.clone(),
+            cutout_mesh: self.cutout.clone(),
+            transparent_mesh: self.transparent.clone(),
             atlas: self.atlas.clone(),
             bounds: self.bounds,
             greedy_materials,
@@ -282,25 +310,41 @@ fn layer_to_mesh(layer: &MeshLayer) -> crate::mesher::geometry::Mesh {
 }
 
 /// Convert an internal [`Mesh`](crate::mesher::geometry::Mesh) to a [`MeshLayer`].
+///
+/// Single pass over the (AoS) vertex buffer, splitting into the four SoA arrays
+/// at once — the naive version made four separate strided passes over tens of
+/// millions of 48-byte vertices (4x the memory reads).
 pub(crate) fn mesh_to_layer(mesh: &crate::mesher::geometry::Mesh) -> MeshLayer {
+    let n = mesh.vertices.len();
+    let mut positions = Vec::with_capacity(n);
+    let mut normals = Vec::with_capacity(n);
+    let mut uvs = Vec::with_capacity(n);
+    let mut colors = Vec::with_capacity(n);
+    for v in &mesh.vertices {
+        positions.push(v.position);
+        normals.push(v.normal);
+        uvs.push(v.uv);
+        colors.push(v.color);
+    }
     MeshLayer {
-        positions: mesh.vertices.iter().map(|v| v.position).collect(),
-        normals: mesh.vertices.iter().map(|v| v.normal).collect(),
-        uvs: mesh.vertices.iter().map(|v| v.uv).collect(),
-        colors: mesh.vertices.iter().map(|v| v.color).collect(),
+        positions,
+        normals,
+        uvs,
+        colors,
         indices: mesh.indices.clone(),
     }
 }
 
-impl From<&crate::mesher::MesherOutput> for MeshOutput {
+impl From<crate::mesher::MesherOutput> for MeshOutput {
     /// Convert from the internal [`MesherOutput`] to the canonical [`MeshOutput`].
     ///
-    /// Greedy materials are preserved as dedicated [`GreedyMaterialOutput`]
-    /// entries — they are *not* merged into the atlas-shared layers. Their
-    /// tile-space UVs only render correctly against their own per-material
-    /// texture with a REPEAT sampler; merging them into the opaque layer
-    /// would smear the full atlas across every merged face.
-    fn from(output: &crate::mesher::MesherOutput) -> Self {
+    /// Takes the output by value: the main layers are already SoA [`MeshLayer`]s,
+    /// so they MOVE across with no copy (this is the whole point of the SoA
+    /// pipeline — `to_mesh` no longer pays an AoS→SoA conversion). Greedy
+    /// materials are preserved as dedicated [`GreedyMaterialOutput`] entries
+    /// (their tile-space UVs only render correctly against their own per-material
+    /// REPEAT-sampled texture, so they are not merged into the atlas layers).
+    fn from(output: crate::mesher::MesherOutput) -> Self {
         let greedy_materials = output
             .greedy_materials
             .iter()
@@ -313,12 +357,12 @@ impl From<&crate::mesher::MesherOutput> for MeshOutput {
             .collect();
 
         MeshOutput {
-            opaque: mesh_to_layer(&output.opaque_mesh),
-            cutout: mesh_to_layer(&output.cutout_mesh),
-            transparent: mesh_to_layer(&output.transparent_mesh),
-            atlas: output.atlas.clone(),
+            opaque: output.opaque_mesh,
+            cutout: output.cutout_mesh,
+            transparent: output.transparent_mesh,
+            atlas: output.atlas,
             greedy_materials,
-            animated_textures: output.animated_textures.clone(),
+            animated_textures: output.animated_textures,
             bounds: output.bounds,
             chunk_coord: None,
             lod_level: 0,

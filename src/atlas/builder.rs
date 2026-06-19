@@ -122,9 +122,12 @@ impl AtlasBuilder {
         let padding = self.padding;
         let max_size = self.max_size;
 
-        // Sort textures by height (tallest first) for better packing
+        // Sort textures by height (tallest first) for better packing, with the
+        // path as a tiebreaker so packing is FULLY deterministic. Without the
+        // tiebreaker, equal-height textures kept their (hash-random) HashMap
+        // order, making the packed atlas — and the exported GLB — vary run-to-run.
         let mut textures: Vec<_> = self.textures.into_iter().collect();
-        textures.sort_by(|a, b| b.1.height.cmp(&a.1.height));
+        textures.sort_by(|a, b| b.1.height.cmp(&a.1.height).then_with(|| a.0.cmp(&b.0)));
 
         // Calculate required atlas size
         let total_area: u32 = textures
