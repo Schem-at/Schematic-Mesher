@@ -9,7 +9,7 @@ keywords = ["minecraft", "mesh", "gltf", "voxel", "schematic"]
 categories = ["rendering", "game-development"]
 readme = "README.md"
 authors = ["Nano nano@schem.at"]
-exclude = ["web/", "examples/", "minecraft-src/"]
+exclude = ["web/", "examples/", "minecraft-src/", "tools/", "todo.md"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
