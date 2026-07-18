@@ -62,4 +62,4 @@ rayon = "1"
 
 [dev-dependencies]
 tempfile = "3.0"
-nucleation = { path = "/Users/harrison/RustroverProjects/Nucleation", default-features = false }
+nucleation = { git = "https://github.com/Schem-at/Nucleation.git", default-features = false }
