@@ -141,6 +141,7 @@ pub(super) fn chicken_model() -> EntityModelDef {
         texture_path: "entity/chicken/temperate_chicken".to_string(),
         texture_size: [64, 32],
         parts: vec![root],
-        is_opaque: true,
+        // Legs/feet use the toe texture region which has transparent pixels.
+        is_opaque: false,
     }
 }

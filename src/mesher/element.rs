@@ -10,6 +10,30 @@ use crate::mesher::liquid::{self, FluidState};
 use crate::mesher::MesherConfig;
 use crate::resolver::{resolve_block, ModelResolver, ResolvedModel};
 use crate::resource_pack::{ModelElement, ModelFace, ResourcePack, TextureData};
+
+// --- Fast-path coverage instrumentation (env `MESHER_STATS`) -----------------
+// Counts, per mesh, how many emitted faces are full-opaque-cube ("fast-path"
+// eligible for a binary greedy mesher) vs total, and how many of those are fully
+// lit (mergeable without per-AO handling). Used to size the hybrid binary mesher
+// against the non-cube/state reality before integrating it.
+pub(crate) static STAT_TOTAL_FACES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static STAT_CUBE_FACES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(crate) static STAT_CUBE_LIT_FACES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[inline]
+fn stats_enabled() -> bool {
+    use std::sync::atomic::{AtomicU8, Ordering};
+    static S: AtomicU8 = AtomicU8::new(2); // 2 = uninitialized
+    match S.load(Ordering::Relaxed) {
+        0 => false,
+        1 => true,
+        _ => {
+            let v = std::env::var("MESHER_STATS").is_ok();
+            S.store(v as u8, Ordering::Relaxed);
+            v
+        }
+    }
+}
 use crate::types::{BlockPosition, BlockTransform, Direction, InputBlock};
 use glam::{Mat3, Vec3};
 use std::collections::{HashMap, HashSet};
@@ -76,6 +100,17 @@ fn block_cache_key(block: &InputBlock) -> String {
     }
 }
 
+/// Send-able accumulated geometry extracted from a per-chunk [`MeshBuilder`] so
+/// it can be merged on the main thread after parallel meshing. Deliberately
+/// excludes the thread-local resolve/model caches (which hold `Rc`/`RefCell`).
+pub(crate) struct PartialMesh {
+    mesh: Mesh,
+    texture_refs: HashSet<String>,
+    face_textures: Vec<FaceTextureMapping>,
+    greedy_face_textures: Vec<GreedyFaceMapping>,
+    dynamic_textures: HashMap<String, TextureData>,
+}
+
 /// Builds a mesh from multiple blocks.
 pub struct MeshBuilder<'a> {
     resource_pack: &'a ResourcePack,
@@ -92,9 +127,17 @@ pub struct MeshBuilder<'a> {
     /// Greedy mesher for merging adjacent coplanar faces.
     greedy: Option<GreedyMesher>,
     /// Cache of resolved models keyed by block identity (name + properties).
-    resolve_cache: HashMap<String, Vec<ResolvedModel>>,
+    /// Wrapped in `Rc` so per-block cache hits only bump a refcount instead of
+    /// deep-cloning the resolved `BlockModel`s (hot path: millions of blocks).
+    resolve_cache: rustc_hash::FxHashMap<String, std::rc::Rc<Vec<ResolvedModel>>>,
+    /// 1-entry memo of the last resolved block, keyed by its `InputBlock` pointer.
+    /// Blocks are processed in spatial scan order, so terrain has long runs of the
+    /// same palette entry (same pointer) — these skip the per-block string cache
+    /// key entirely. Non-palette sources (distinct pointers) simply never hit it.
+    last_block_ptr: usize,
+    last_resolved: std::rc::Rc<Vec<ResolvedModel>>,
     /// Block map for neighbor lookups (used by liquid geometry).
-    block_map: Option<&'a HashMap<BlockPosition, &'a InputBlock>>,
+    block_map: Option<&'a rustc_hash::FxHashMap<BlockPosition, &'a InputBlock>>,
     /// Light map for brightness calculations.
     light_map: Option<&'a crate::mesher::lighting::LightMap>,
     /// Dynamic textures generated at build time (banners, inventories).
@@ -102,12 +145,42 @@ pub struct MeshBuilder<'a> {
     dynamic_textures: HashMap<String, TextureData>,
 }
 
+/// Synthetic atlas key for the fallback "unknown texture" tile. Added to every
+/// atlas so faces whose declared texture couldn't be resolved have a valid
+/// region to sample, instead of leaking into full-atlas [0,1] UVs.
+const MISSING_TEXTURE_KEY: &str = "__missing__";
+
+/// Build a 16x16 magenta/black checkerboard texture, MC-style, to mark faces
+/// whose texture couldn't be found in the resource pack.
+fn make_missing_texture() -> TextureData {
+    const SIZE: u32 = 16;
+    let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let magenta = (x / 8 + y / 8) % 2 == 0;
+            if magenta {
+                pixels.extend_from_slice(&[0xF8, 0x00, 0xF8, 0xFF]);
+            } else {
+                pixels.extend_from_slice(&[0x00, 0x00, 0x00, 0xFF]);
+            }
+        }
+    }
+    TextureData {
+        width: SIZE,
+        height: SIZE,
+        pixels,
+        is_animated: false,
+        frame_count: 1,
+        animation: None,
+    }
+}
+
 impl<'a> MeshBuilder<'a> {
     pub fn new(
         resource_pack: &'a ResourcePack,
         config: &'a MesherConfig,
         culler: Option<&'a FaceCuller<'a>>,
-        block_map: Option<&'a HashMap<BlockPosition, &'a InputBlock>>,
+        block_map: Option<&'a rustc_hash::FxHashMap<BlockPosition, &'a InputBlock>>,
         light_map: Option<&'a crate::mesher::lighting::LightMap>,
     ) -> Self {
         let greedy = if config.greedy_meshing {
@@ -125,11 +198,19 @@ impl<'a> MeshBuilder<'a> {
             greedy_face_textures: Vec::new(),
             culler,
             greedy,
-            resolve_cache: HashMap::new(),
+            resolve_cache: rustc_hash::FxHashMap::default(),
+            last_block_ptr: 0,
+            last_resolved: std::rc::Rc::new(Vec::new()),
             block_map,
             light_map,
             dynamic_textures: HashMap::new(),
         }
+    }
+
+    /// Returns the set of texture paths collected during face processing.
+    /// Useful for discovering all textures needed before building a global atlas.
+    pub fn texture_refs(&self) -> &HashSet<String> {
+        &self.texture_refs
     }
 
     /// Add a block to the mesh.
@@ -148,31 +229,43 @@ impl<'a> MeshBuilder<'a> {
             return self.add_liquid(pos, block, &fluid_state);
         }
 
-        let cache_key = block_cache_key(block);
-
-        // Check resolution cache first
-        if let Some(cached) = self.resolve_cache.get(&cache_key).cloned() {
-            for resolved in &cached {
-                self.add_model(pos, block, resolved)?;
-            }
+        // Fast path: identical to the previous block (same palette entry — common
+        // in terrain runs). Reuse the last resolution, skipping the per-block
+        // string cache key + hash entirely.
+        let block_ptr = block as *const InputBlock as usize;
+        let resolved = if block_ptr == self.last_block_ptr {
+            std::rc::Rc::clone(&self.last_resolved)
         } else {
-            // Resolve the block to models
-            let resolved_models = match resolve_block(self.resource_pack, block) {
-                Ok(models) => models,
-                Err(e) => {
-                    // Log warning but continue (don't return — entity check below)
-                    eprintln!("Warning: Failed to resolve block {}: {}", block.name, e);
-                    Vec::new()
-                }
+            let cache_key = block_cache_key(block);
+            // Check resolution cache. On a hit we clone only the `Rc` (a refcount
+            // bump), not the underlying resolved models — this owned handle also
+            // releases the borrow on `self.resolve_cache` so `add_model` can take
+            // `&mut self`.
+            let rc = if let Some(cached) = self.resolve_cache.get(&cache_key) {
+                std::rc::Rc::clone(cached)
+            } else {
+                // Resolve the block to models
+                let resolved_models = match resolve_block(self.resource_pack, block) {
+                    Ok(models) => models,
+                    Err(e) => {
+                        // Log warning but continue (don't return — entity check below)
+                        eprintln!("Warning: Failed to resolve block {}: {}", block.name, e);
+                        Vec::new()
+                    }
+                };
+                let rc = std::rc::Rc::new(resolved_models);
+                // Store in cache for future blocks with same identity
+                self.resolve_cache.insert(cache_key, std::rc::Rc::clone(&rc));
+                rc
             };
+            self.last_block_ptr = block_ptr;
+            self.last_resolved = std::rc::Rc::clone(&rc);
+            rc
+        };
 
-            // Generate geometry for each model
-            for resolved in &resolved_models {
-                self.add_model(pos, block, resolved)?;
-            }
-
-            // Store in cache for future blocks with same identity
-            self.resolve_cache.insert(cache_key, resolved_models);
+        // Generate geometry for each model
+        for resolved in resolved.iter() {
+            self.add_model(pos, block, resolved)?;
         }
 
         // Check for block entity — generates additive geometry
@@ -192,7 +285,7 @@ impl<'a> MeshBuilder<'a> {
             }
         }
 
-        // Waterlogged blocks: add water source overlay
+        // Waterlogged blocks: add water source overlay.
         if liquid::is_waterlogged(block) {
             let water_state = FluidState {
                 fluid_type: liquid::FluidType::Water,
@@ -206,6 +299,18 @@ impl<'a> MeshBuilder<'a> {
         Ok(())
     }
 
+    /// Consume this builder, returning its accumulated geometry as a `Send`
+    /// [`PartialMesh`]. The thread-local resolve/model caches are dropped.
+    pub(crate) fn into_partial(self) -> PartialMesh {
+        PartialMesh {
+            mesh: self.mesh,
+            texture_refs: self.texture_refs,
+            face_textures: self.face_textures,
+            greedy_face_textures: self.greedy_face_textures,
+            dynamic_textures: self.dynamic_textures,
+        }
+    }
+
     /// Add liquid geometry for a water/lava block.
     fn add_liquid(
         &mut self,
@@ -213,14 +318,30 @@ impl<'a> MeshBuilder<'a> {
         block: &InputBlock,
         state: &FluidState,
     ) -> Result<()> {
+        self.add_liquid_inset(pos, block, state, 0.0)
+    }
+
+    /// Same as `add_liquid` but shrinks the generated water cube by `inset`
+    /// toward its block center. Used for waterlogged blocks so the water's
+    /// boundary faces don't coincide with the host block's own faces.
+    fn add_liquid_inset(
+        &mut self,
+        pos: BlockPosition,
+        block: &InputBlock,
+        state: &FluidState,
+        inset: f32,
+    ) -> Result<()> {
         // Get the block map for neighbor lookups
-        let empty_map = HashMap::new();
+        let empty_map: rustc_hash::FxHashMap<BlockPosition, &InputBlock> =
+            rustc_hash::FxHashMap::default();
         let block_map = self.block_map.unwrap_or(&empty_map);
 
-        // Determine base color: water uses tint, lava uses white
+        // Determine base color: water always uses the biome water tint (MC applies
+        // this regardless of host block, including waterlogged stairs/slabs/etc).
+        // Lava is never tinted.
         let base_color = match state.fluid_type {
             liquid::FluidType::Water => {
-                let mut c = self.config.tint_provider.get_tint(block, 0);
+                let mut c = self.config.tint_provider.colors().water;
                 c[3] = 0.8; // Water is semi-transparent
                 c
             }
@@ -232,8 +353,21 @@ impl<'a> MeshBuilder<'a> {
             self.culler.map(|c| c.is_fully_opaque_at(p)).unwrap_or(false)
         };
 
-        let (vertices, indices, face_textures) =
+        let (mut vertices, indices, face_textures) =
             liquid::generate_fluid_geometry(pos, state, block_map, is_opaque, base_color);
+
+        // Apply inset: pull each vertex toward the block center. At inset=0.002
+        // the shift is imperceptible but enough to eliminate coplanar z-fighting.
+        if inset > 0.0 {
+            let cx = pos.x as f32 + 0.5;
+            let cy = pos.y as f32 + 0.5;
+            let cz = pos.z as f32 + 0.5;
+            for v in &mut vertices {
+                v.position[0] += (cx - v.position[0]).signum() * inset;
+                v.position[1] += (cy - v.position[1]).signum() * inset;
+                v.position[2] += (cz - v.position[2]).signum() * inset;
+            }
+        }
 
         // Register texture refs
         self.texture_refs.insert(state.still_texture().to_string());
@@ -381,8 +515,34 @@ impl<'a> MeshBuilder<'a> {
         block: &InputBlock,
         mob_type: entity::MobType,
     ) -> Result<()> {
-        let (vertices, indices, face_textures) =
+        let (vertices, indices, mut face_textures) =
             entity::generate_mob_geometry(block, mob_type);
+
+        // Villagers render as three stacked draw passes in MC: base skin +
+        // biome overlay + profession overlay. Composite them into one texture.
+        if matches!(mob_type, entity::MobType::Villager) {
+            let biome = block.properties.get("biome")
+                .map(|s| s.as_str()).unwrap_or("plains");
+            let profession = block.properties.get("profession")
+                .map(|s| s.as_str()).unwrap_or("none");
+            let tex_key = format!("_villager/{}/{}", biome, profession);
+
+            if !self.dynamic_textures.contains_key(&tex_key) {
+                if let Some(tex) = entity::villager_texture::composite_villager_texture(
+                    self.resource_pack, biome, profession,
+                ) {
+                    self.dynamic_textures.insert(tex_key.clone(), tex);
+                }
+            }
+
+            if self.dynamic_textures.contains_key(&tex_key) {
+                for ft in face_textures.iter_mut() {
+                    if ft.texture == "entity/villager/villager" {
+                        ft.texture = tex_key.clone();
+                    }
+                }
+            }
+        }
 
         // Add base geometry (may be empty for dropped items)
         if !vertices.is_empty() {
@@ -460,11 +620,17 @@ impl<'a> MeshBuilder<'a> {
         // Sheep: render wool overlay
         if matches!(mob_type, entity::MobType::Sheep) {
             let mut wool_model = crate::mesher::entity::sheep::sheep_wool_model();
-            // Apply baby scaling to wool overlay too
+            // Apply baby scaling to wool overlay too (head gets same extra 2× so
+            // it tracks the base sheep's big-head proportions).
             if block.properties.get("is_baby").map(|v| v == "true").unwrap_or(false) {
                 if let Some(root) = wool_model.parts.first_mut() {
                     root.pose.scale = [0.5, 0.5, 0.5];
                     root.pose.position[1] = 12.0;
+                    if let Some(head) = root.children.first_mut() {
+                        head.pose.scale[0] *= 2.0;
+                        head.pose.scale[1] *= 2.0;
+                        head.pose.scale[2] *= 2.0;
+                    }
                 }
             }
             let facing = block.properties.get("facing")
@@ -508,13 +674,21 @@ impl<'a> MeshBuilder<'a> {
         if matches!(mob_type, entity::MobType::Player) {
             let tex_key = format!("_player/{}_{}_{}", pos.x, pos.y, pos.z);
             if !self.dynamic_textures.contains_key(&tex_key) {
-                // Try hex skin property
-                if let Some(skin_hex) = block.properties.get("skin") {
-                    if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+                // Try base64 skin property first (primary path for WASM/JS callers).
+                if let Some(skin_b64) = block.properties.get("skin_base64") {
+                    if let Some(skin_tex) = entity::skull::decode_base64_skin(skin_b64) {
                         self.dynamic_textures.insert(tex_key.clone(), skin_tex);
                     }
                 }
-                // Fallback to Steve/Alex from resource pack
+                // Then try hex skin property (legacy/inline-in-Rust path).
+                if !self.dynamic_textures.contains_key(&tex_key) {
+                    if let Some(skin_hex) = block.properties.get("skin") {
+                        if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+                            self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                        }
+                    }
+                }
+                // Finally fall back to Steve/Alex from the resource pack.
                 if !self.dynamic_textures.contains_key(&tex_key) {
                     let fallback = entity::skull::player_skin_fallback_path(block);
                     if let Some(tex) = self.resource_pack.get_texture(fallback) {
@@ -565,7 +739,213 @@ impl<'a> MeshBuilder<'a> {
             }
         }
 
+        // Equipment overlays (saddle on pig/horse, horse armor). Rendered as a
+        // second pass over the mob's model with cubes inflated slightly.
+        if !matches!(mob_type, entity::MobType::Player
+            | entity::MobType::DroppedItem
+            | entity::MobType::ItemFrame
+            | entity::MobType::GlowItemFrame
+            | entity::MobType::Boat
+            | entity::MobType::ChestBoat)
+        {
+            let base_model = entity::mob::build_mob_model(mob_type, block);
+            let overlays = entity::equipment::overlays_for(mob_type, block, &base_model);
+            if !overlays.is_empty() {
+                let facing = block.properties.get("facing")
+                    .map(|s| s.as_str()).unwrap_or("south");
+                let facing_angle = entity::facing_rotation_rad(facing);
+                let facing_mat = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+                    * glam::Mat4::from_rotation_y(facing_angle)
+                    * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+                for overlay in overlays {
+                    let mut verts = Vec::new();
+                    let mut indices = Vec::new();
+                    let mut faces = Vec::new();
+                    entity::traverse_parts(
+                        &overlay.model.parts, glam::Mat4::IDENTITY, &facing_mat,
+                        &overlay.model, &mut verts, &mut indices, &mut faces,
+                    );
+                    if !verts.is_empty() {
+                        self.add_offset_geometry(pos, [0.0, 0.0, 0.0], &verts, &indices, &faces);
+                    }
+                }
+            }
+        }
+
+        // Passenger / rider — e.g. a player on a saddled pig, or a zombie on a minecart.
+        // Host mobs advertise a mount offset via `entity::rider_offset`. We generate
+        // the rider's geometry and translate it onto that saddle point. Only one level
+        // of nesting is supported (the rider's own `rider` prop is ignored).
+        if let Some(rider_name) = block.properties.get("rider").cloned() {
+            self.add_rider_on(pos, block, mob_type, &rider_name)?;
+        }
+
         Ok(())
+    }
+
+    /// Generate geometry for a rider sitting on `host_mob` and add it to the mesh.
+    fn add_rider_on(
+        &mut self,
+        host_pos: BlockPosition,
+        host_block: &crate::types::InputBlock,
+        host_mob: entity::MobType,
+        rider_name: &str,
+    ) -> Result<()> {
+        use crate::types::InputBlock;
+
+        let bare = rider_name.strip_prefix("entity:").unwrap_or(rider_name);
+        let mut rider_block = InputBlock::new(&format!("entity:{}", bare));
+
+        // Rider faces the same way as the host by default, and inherits any visual
+        // props the rider's renderer needs (skin, armor, etc.).
+        let host_facing = host_block.properties.get("facing")
+            .map(|s| s.as_str()).unwrap_or("south");
+        rider_block.properties.insert("facing".to_string(), host_facing.to_string());
+        for key in ["skin", "skin_base64", "uuid", "slim", "helmet", "chestplate",
+                    "leggings", "boots", "color", "variant", "is_baby"] {
+            if let Some(v) = host_block.properties.get(key) {
+                rider_block.properties.insert(key.to_string(), v.clone());
+            }
+        }
+        // Copy pose properties so a riding player can have posed arms/legs.
+        for key in ["HeadPose", "BodyPose", "RightArmPose", "LeftArmPose",
+                    "RightLegPose", "LeftLegPose"] {
+            if let Some(v) = host_block.properties.get(key) {
+                rider_block.properties.insert(key.to_string(), v.clone());
+            }
+        }
+
+        let rider_type = match entity::detect_mob(&rider_block) {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+
+        // Apply MC's default passenger sitting pose to humanoids/players, unless
+        // the host already specified leg poses. Values from HumanoidModel.setupAnim
+        // when `isPassenger`: legs bent forward ~81° and spread ±18°.
+        let is_humanoid_rider = matches!(
+            rider_type,
+            entity::MobType::Player | entity::MobType::Zombie | entity::MobType::Skeleton
+                | entity::MobType::Villager | entity::MobType::ArmorStand
+        );
+        if is_humanoid_rider && !rider_block.properties.contains_key("RightLegPose") {
+            rider_block.properties.insert("RightLegPose".to_string(), "-81,18,0".to_string());
+            rider_block.properties.insert("LeftLegPose".to_string(), "-81,-18,0".to_string());
+        }
+
+        let saddle = entity::rider_offset(host_mob);
+
+        // Player riders use the dynamic-skin path; other mobs use the standard one.
+        if matches!(rider_type, entity::MobType::Player) {
+            let tex_key = format!("_player/{}_{}_{}_rider", host_pos.x, host_pos.y, host_pos.z);
+            if !self.dynamic_textures.contains_key(&tex_key) {
+                if let Some(skin_b64) = rider_block.properties.get("skin_base64") {
+                    if let Some(skin_tex) = entity::skull::decode_base64_skin(skin_b64) {
+                        self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                    }
+                }
+                if !self.dynamic_textures.contains_key(&tex_key) {
+                    if let Some(skin_hex) = rider_block.properties.get("skin") {
+                        if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+                            self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                        }
+                    }
+                }
+                if !self.dynamic_textures.contains_key(&tex_key) {
+                    let fallback = entity::skull::player_skin_fallback_path(&rider_block);
+                    if let Some(tex) = self.resource_pack.get_texture(fallback) {
+                        self.dynamic_textures.insert(tex_key.clone(), tex.clone());
+                    }
+                }
+            }
+
+            let model = entity::player::player_model(&rider_block, &tex_key);
+            let facing_angle = entity::facing_rotation_rad(host_facing);
+            let facing_mat = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
+                * glam::Mat4::from_rotation_y(facing_angle)
+                * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+
+            let mut verts = Vec::new();
+            let mut indices = Vec::new();
+            let mut faces = Vec::new();
+            entity::traverse_parts(
+                &model.parts, glam::Mat4::IDENTITY, &facing_mat, &model,
+                &mut verts, &mut indices, &mut faces,
+            );
+            self.add_offset_geometry(host_pos, saddle, &verts, &indices, &faces);
+        } else {
+            let (verts, indices, mut faces) =
+                entity::generate_mob_geometry(&rider_block, rider_type);
+
+            // Villagers need the biome+profession compositing like the top-level
+            // villager handling does; without it the rider is "naked".
+            if matches!(rider_type, entity::MobType::Villager) {
+                let biome = rider_block.properties.get("biome")
+                    .map(|s| s.as_str()).unwrap_or("plains");
+                let profession = rider_block.properties.get("profession")
+                    .map(|s| s.as_str()).unwrap_or("none");
+                let tex_key = format!("_villager/{}/{}", biome, profession);
+                if !self.dynamic_textures.contains_key(&tex_key) {
+                    if let Some(tex) = entity::villager_texture::composite_villager_texture(
+                        self.resource_pack, biome, profession,
+                    ) {
+                        self.dynamic_textures.insert(tex_key.clone(), tex);
+                    }
+                }
+                if self.dynamic_textures.contains_key(&tex_key) {
+                    for ft in faces.iter_mut() {
+                        if ft.texture == "entity/villager/villager" {
+                            ft.texture = tex_key.clone();
+                        }
+                    }
+                }
+            }
+
+            if !verts.is_empty() {
+                self.add_offset_geometry(host_pos, saddle, &verts, &indices, &faces);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Push entity geometry onto the mesh at `pos + extra_offset`. Used for riders.
+    fn add_offset_geometry(
+        &mut self,
+        pos: BlockPosition,
+        extra: [f32; 3],
+        vertices: &[crate::mesher::Vertex],
+        indices: &[u32],
+        face_textures: &[entity::EntityFaceTexture],
+    ) {
+        for ft in face_textures {
+            self.texture_refs.insert(ft.texture.clone());
+        }
+        let base_vertex = self.mesh.vertex_count() as u32;
+        let base_index = self.mesh.indices.len();
+
+        for v in vertices {
+            let mut vertex = *v;
+            vertex.position[0] += pos.x as f32 - 0.5 + extra[0];
+            vertex.position[1] += pos.y as f32 - 0.5 + extra[1];
+            vertex.position[2] += pos.z as f32 - 0.5 + extra[2];
+            self.mesh.add_vertex(vertex);
+        }
+        for &idx in indices {
+            self.mesh.indices.push(base_vertex + idx);
+        }
+
+        let mut idx_offset = base_index;
+        for ft in face_textures {
+            let face_v_start = (idx_offset - base_index) as u32 / 6 * 4 + base_vertex;
+            self.face_textures.push(FaceTextureMapping {
+                vertex_start: face_v_start,
+                index_start: idx_offset,
+                texture_path: ft.texture.clone(),
+                is_transparent: ft.is_transparent,
+            });
+            idx_offset += 6;
+        }
     }
 
     /// Add inventory hologram above a container block.
@@ -797,9 +1177,14 @@ impl<'a> MeshBuilder<'a> {
         }
 
         // Composite texture if not cached
+        let kind = if is_wall {
+            entity::sign_text::SignKind::Wall
+        } else {
+            entity::sign_text::SignKind::Standing
+        };
         if !self.dynamic_textures.contains_key(&tex_key) {
             if let Some(tex) = entity::sign_text::composite_sign_with_text(
-                self.resource_pack, base_texture, &lines, color, glowing,
+                self.resource_pack, base_texture, &lines, color, glowing, kind,
             ) {
                 self.dynamic_textures.insert(tex_key.clone(), tex);
             } else {
@@ -853,11 +1238,35 @@ impl<'a> MeshBuilder<'a> {
         pos: BlockPosition,
         block: &InputBlock,
     ) -> Result<()> {
-        let (vertices, indices, face_textures) =
+        let (vertices, indices, mut face_textures) =
             entity::decorated_pot::generate_decorated_pot_geometry(block);
 
         if vertices.is_empty() {
             return Ok(());
+        }
+
+        // Pattern (sherd) textures are transparent around the pot silhouette —
+        // rendering them directly leaves "holes" where the pattern doesn't cover.
+        // MC renders patterns on top of an opaque `decorated_pot_side` texture.
+        // We composite each unique pattern onto the side texture and swap the
+        // face texture to point at the composite.
+        for ft in face_textures.iter_mut() {
+            if let Some(pat) = ft.texture.strip_prefix("entity/decorated_pot/")
+                .and_then(|s| s.strip_suffix("_pottery_pattern"))
+            {
+                let key = format!("_pot/{}", pat);
+                if !self.dynamic_textures.contains_key(&key) {
+                    if let Some(tex) = composite_pot_side(self.resource_pack, pat) {
+                        self.dynamic_textures.insert(key.clone(), tex);
+                    }
+                }
+                if self.dynamic_textures.contains_key(&key) {
+                    ft.texture = key;
+                    // Composite is fully opaque — route through the solid mesh
+                    // so we don't get alpha-cutout artifacts.
+                    ft.is_transparent = false;
+                }
+            }
         }
 
         self.add_item_geometry(pos, &vertices, &indices, &face_textures);
@@ -877,11 +1286,18 @@ impl<'a> MeshBuilder<'a> {
         // Determine texture key
         let tex_key = format!("_player_head/{}_{}_{}", pos.x, pos.y, pos.z);
 
-        // Try to decode hex skin property, otherwise use fallback
+        // Prefer base64 skin (the WASM/JS-friendly path), then hex, then fallback.
         if !self.dynamic_textures.contains_key(&tex_key) {
-            if let Some(skin_hex) = block.properties.get("skin") {
-                if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+            if let Some(skin_b64) = block.properties.get("skin_base64") {
+                if let Some(skin_tex) = entity::skull::decode_base64_skin(skin_b64) {
                     self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                }
+            }
+            if !self.dynamic_textures.contains_key(&tex_key) {
+                if let Some(skin_hex) = block.properties.get("skin") {
+                    if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
+                        self.dynamic_textures.insert(tex_key.clone(), skin_tex);
+                    }
                 }
             }
             // If no skin decoded, load fallback from resource pack
@@ -959,6 +1375,7 @@ impl<'a> MeshBuilder<'a> {
         if !self.dynamic_textures.contains_key(&tex_key) {
             if let Some(tex) = entity::sign_text::composite_sign_with_text(
                 self.resource_pack, base_texture, &lines, color, glowing,
+                entity::sign_text::SignKind::Hanging,
             ) {
                 self.dynamic_textures.insert(tex_key.clone(), tex);
             } else {
@@ -1058,9 +1475,15 @@ impl<'a> MeshBuilder<'a> {
         // Resolve textures for this model
         let resolved_textures = self.model_resolver.resolve_textures(model);
 
+        // Greedy merging is only safe for single-element models. Multi-element
+        // models (e.g. grass blocks, which have a base cube + a coplanar tinted
+        // `*_overlay` cube) would merge each element into its own coplanar quad
+        // and z-fight; those must go through the normal atlas path instead.
+        let single_element = model.elements.len() == 1;
+
         // Process each element
         for element in &model.elements {
-            self.add_element(pos, block, element, transform, &resolved_textures)?;
+            self.add_element(pos, block, element, transform, &resolved_textures, single_element)?;
         }
 
         Ok(())
@@ -1124,12 +1547,19 @@ impl<'a> MeshBuilder<'a> {
         element: &ModelElement,
         transform: &BlockTransform,
         resolved_textures: &std::collections::HashMap<String, String>,
+        single_element: bool,
     ) -> Result<()> {
         // Compute lighting factor for this block position
         let is_emissive = self.light_map.map(|lm| lm.is_emissive(pos)).unwrap_or(false);
 
-        // Process each face
-        for (direction, face) in &element.faces {
+        // Process each face. Iterate the fixed Direction::ALL order (not the
+        // model's `faces` HashMap, whose iteration order is hash-random) so the
+        // emitted vertex order — and thus the exported mesh — is deterministic.
+        for direction in Direction::ALL.iter() {
+            let face = match element.faces.get(direction) {
+                Some(f) => f,
+                None => continue,
+            };
             // Transform the face direction by block rotation (for AO and cullface)
             let world_direction = direction.rotate_by_transform(transform.x, transform.y);
 
@@ -1147,6 +1577,24 @@ impl<'a> MeshBuilder<'a> {
             // Resolve the texture reference
             let texture_path = self.resolve_face_texture(&face.texture, resolved_textures);
             self.texture_refs.insert(texture_path.clone());
+
+            // Fast-path coverage stats: classify this surviving face.
+            if stats_enabled() {
+                use std::sync::atomic::Ordering::Relaxed;
+                STAT_TOTAL_FACES.fetch_add(1, Relaxed);
+                if single_element && self.is_greedy_eligible(element, face, transform) {
+                    STAT_CUBE_FACES.fetch_add(1, Relaxed);
+                    let lit = !(self.config.ambient_occlusion && !is_emissive && element.shade)
+                        || self
+                            .culler
+                            .map(|c| c.calculate_ao(pos, world_direction))
+                            .unwrap_or([3, 3, 3, 3])
+                            == [3, 3, 3, 3];
+                    if lit {
+                        STAT_CUBE_LIT_FACES.fetch_add(1, Relaxed);
+                    }
+                }
+            }
 
             // Check if texture has transparency
             let is_transparent = self.resource_pack
@@ -1170,14 +1618,18 @@ impl<'a> MeshBuilder<'a> {
                 15
             };
 
-            // Route to greedy mesher if eligible
-            if self.greedy.is_some() && self.is_greedy_eligible(element, face, transform) {
-                let mut base_color = self.config.tint_provider.get_tint(block, face.tintindex);
-                // Apply lighting to tint color before quantization
-                base_color[0] *= light_factor;
-                base_color[1] *= light_factor;
-                base_color[2] *= light_factor;
-                // Compute per-vertex AO for this face so it's included in the merge key
+            // Route to greedy mesher if eligible. We only merge fully-lit faces
+            // (AO == [3,3,3,3]); AO'd faces fall through to the shared-atlas path
+            // below, where per-block AO is correct. This avoids the per-AO-pattern
+            // material/texture explosion that baking AO into greedy tiles caused,
+            // and is the only practical greedy mode (full greedy produced
+            // thousands of materials). Multi-element / overlay blocks (grass etc.)
+            // are excluded via `single_element` to avoid coplanar z-fighting.
+            if self.greedy.is_some()
+                && single_element
+                && self.is_greedy_eligible(element, face, transform)
+            {
+                // Compute per-vertex AO; only fully-lit faces are eligible to merge.
                 let ao = if self.config.ambient_occlusion && !is_emissive && element.shade {
                     self.culler
                         .map(|c| c.calculate_ao(pos, world_direction))
@@ -1185,19 +1637,27 @@ impl<'a> MeshBuilder<'a> {
                 } else {
                     [3, 3, 3, 3]
                 };
-                let key = FaceMergeKey {
-                    texture: texture_path,
-                    tint: quantize_color(base_color),
-                    ao,
-                    light: light_key,
-                };
-                self.greedy.as_mut().unwrap().add_face(
-                    pos,
-                    world_direction,
-                    key,
-                    is_transparent,
-                );
-                continue;
+                if ao == [3, 3, 3, 3] {
+                    let mut base_color = self.config.tint_provider.get_tint(block, face.tintindex);
+                    // Apply lighting to tint color before quantization
+                    base_color[0] *= light_factor;
+                    base_color[1] *= light_factor;
+                    base_color[2] *= light_factor;
+                    let key = FaceMergeKey {
+                        texture: texture_path.clone(),
+                        tint: quantize_color(base_color),
+                        ao,
+                        light: light_key,
+                    };
+                    self.greedy.as_mut().unwrap().add_face(
+                        pos,
+                        world_direction,
+                        key,
+                        is_transparent,
+                    );
+                    continue;
+                }
+                // AO'd face: fall through to the atlas path below.
             }
 
             // Detect glow overlay: shade:false, single face, no cullface.
@@ -1553,7 +2013,7 @@ impl<'a> MeshBuilder<'a> {
     /// Emit merged quads from the greedy mesher into the mesh.
     /// Greedy faces use tiled UVs [0, width] x [0, height] and bypass the atlas.
     /// AO is baked into the tile texture (not vertex colors) for universal viewer support.
-    fn emit_greedy_quads(&mut self) {
+    pub(crate) fn emit_greedy_quads(&mut self) {
         let greedy = match self.greedy.take() {
             Some(g) => g,
             None => return,
@@ -1617,51 +2077,38 @@ impl<'a> MeshBuilder<'a> {
     /// Render order: opaque first, then cutout (alpha-tested), then transparent (alpha-blended).
     /// Greedy materials have their own textures with REPEAT wrapping for tiling.
     /// Animated exports contain sprite sheets from dynamic textures (particles, etc.).
-    pub fn build(mut self) -> Result<(Mesh, Mesh, Mesh, TextureAtlas, Vec<GreedyMaterial>, Vec<super::AnimatedTextureExport>)> {
+    ///
+    /// If `pre_built_atlas` is `Some`, it is used directly instead of building a new atlas.
+    /// Dynamic textures (banners, signs, skins) that are NOT in the pre-built atlas will be
+    /// added to it via a supplemental atlas build pass.
+    pub fn build(mut self, pre_built_atlas: Option<TextureAtlas>) -> Result<(crate::mesh_output::MeshLayer, crate::mesh_output::MeshLayer, crate::mesh_output::MeshLayer, TextureAtlas, Vec<GreedyMaterial>, Vec<super::AnimatedTextureExport>)> {
         // Emit greedy-merged quads into the mesh before atlas building
         self.emit_greedy_quads();
 
-        // Build texture atlas (only for non-greedy faces)
-        let mut atlas_builder = AtlasBuilder::new(
-            self.config.atlas_max_size,
-            self.config.atlas_padding,
-        );
+        let atlas = self.build_atlas(pre_built_atlas)?;
 
-        for texture_ref in &self.texture_refs {
-            // Check dynamic textures first, then resource pack
-            if let Some(texture) = self.dynamic_textures.get(texture_ref) {
-                atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
-            } else if let Some(texture) = self.resource_pack.get_texture(texture_ref) {
-                atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
-            }
-        }
-
-        let atlas = atlas_builder.build()?;
-
-        // Remap UVs to atlas coordinates (only non-greedy faces)
-        for face_mapping in &self.face_textures {
-            if let Some(region) = atlas.get_region(&face_mapping.texture_path) {
-                // Each face has 4 vertices
-                for i in 0..4 {
-                    let vertex_idx = face_mapping.vertex_start as usize + i;
-                    if vertex_idx < self.mesh.vertices.len() {
-                        let vertex = &mut self.mesh.vertices[vertex_idx];
-                        // Transform UV from [0,1] local space to atlas region
-                        vertex.uv = region.transform_uv(vertex.uv[0], vertex.uv[1]);
-                    }
-                }
-            }
-        }
-
-        // Separate atlas-based faces into opaque, cutout, and transparent meshes
-        let (opaque_mesh, cutout_mesh, transparent_mesh) = self.separate_by_transparency();
+        // Split faces into opaque/cutout/transparent layers, applying each face's
+        // atlas UV transform during the copy (see `separate_by_transparency`).
+        let (opaque_mesh, cutout_mesh, transparent_mesh) = self.separate_by_transparency(&atlas);
 
         // Build greedy materials: group greedy faces by texture path
         let greedy_materials = self.build_greedy_materials();
 
-        // Collect animated texture exports from dynamic textures (particles, etc.)
+        let animated_exports = self.collect_dynamic_animated(&atlas);
+
+        Ok((opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials, animated_exports))
+    }
+
+    /// Collect animated-texture sprite-sheet exports for any dynamic textures
+    /// (particles, banners, etc.) that ended up in the atlas.
+    fn collect_dynamic_animated(&self, atlas: &TextureAtlas) -> Vec<super::AnimatedTextureExport> {
         let mut animated_exports = Vec::new();
-        for (key, tex) in &self.dynamic_textures {
+        // Iterate in sorted key order so animated-texture exports (and thus the
+        // glTF image/texture order) are deterministic — dynamic_textures is a hash map.
+        let mut keys: Vec<&String> = self.dynamic_textures.keys().collect();
+        keys.sort_unstable();
+        for key in keys {
+            let tex = &self.dynamic_textures[key];
             if tex.is_animated && tex.frame_count > 1 {
                 if let Some(region) = atlas.get_region(key) {
                     let sprite_sheet_png = match tex.to_png() {
@@ -1673,9 +2120,9 @@ impl<'a> MeshBuilder<'a> {
                     let frame_height = anim.and_then(|a| a.frame_height).unwrap_or(frame_width);
                     let frametime = anim.map(|a| a.frametime).unwrap_or(1);
                     let interpolate = anim.map(|a| a.interpolate).unwrap_or(false);
-                    let frames = anim.and_then(|a| a.frames.as_ref()).map(|fs| {
-                        fs.iter().map(|f| f.index).collect()
-                    });
+                    let frames = anim
+                        .and_then(|a| a.frames.as_ref())
+                        .map(|fs| fs.iter().map(|f| f.index).collect());
                     let atlas_x = (region.u_min * atlas.width as f32).round() as u32;
                     let atlas_y = (region.v_min * atlas.height as f32).round() as u32;
                     animated_exports.push(super::AnimatedTextureExport {
@@ -1692,59 +2139,221 @@ impl<'a> MeshBuilder<'a> {
                 }
             }
         }
+        animated_exports
+    }
 
-        Ok((opaque_mesh, cutout_mesh, transparent_mesh, atlas, greedy_materials, animated_exports))
+    /// Build the texture atlas from `self.texture_refs` (+ dynamic textures),
+    /// or augment a `pre_built_atlas` with any missing dynamic textures.
+    fn build_atlas(&self, pre_built_atlas: Option<TextureAtlas>) -> Result<TextureAtlas> {
+        Ok(if let Some(mut atlas) = pre_built_atlas {
+            // Use pre-built atlas. Any dynamic textures not already in it need to be added.
+            let mut missing_textures = Vec::new();
+            for texture_ref in &self.texture_refs {
+                if !atlas.contains(texture_ref) {
+                    if let Some(texture) = self.dynamic_textures.get(texture_ref) {
+                        missing_textures.push((texture_ref.clone(), texture.first_frame()));
+                    } else if let Some(texture) = self.resource_pack.get_texture(texture_ref) {
+                        missing_textures.push((texture_ref.clone(), texture.first_frame()));
+                    }
+                }
+            }
+            if !missing_textures.is_empty() {
+                // Rebuild atlas with both pre-built and missing textures
+                let mut atlas_builder = AtlasBuilder::new(
+                    self.config.atlas_max_size,
+                    self.config.atlas_padding,
+                );
+                // Re-add all existing textures from the pre-built atlas
+                for texture_ref in atlas.regions.keys() {
+                    if let Some(texture) = self.resource_pack.get_texture(texture_ref) {
+                        atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
+                    }
+                }
+                // Add dynamic/missing textures
+                for (path, tex) in missing_textures {
+                    atlas_builder.add_texture(path, tex);
+                }
+                atlas = atlas_builder.build()?;
+            }
+            atlas
+        } else {
+            // Build texture atlas from scratch (only for non-greedy faces)
+            let mut atlas_builder = AtlasBuilder::new(
+                self.config.atlas_max_size,
+                self.config.atlas_padding,
+            );
+
+            // Atlas packing order (and thus determinism) is handled inside
+            // AtlasBuilder::build, which sorts by height + path — so add order
+            // here doesn't matter.
+            for texture_ref in &self.texture_refs {
+                // Check dynamic textures first, then resource pack
+                if let Some(texture) = self.dynamic_textures.get(texture_ref) {
+                    atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
+                } else if let Some(texture) = self.resource_pack.get_texture(texture_ref) {
+                    atlas_builder.add_texture(texture_ref.clone(), texture.first_frame());
+                }
+            }
+
+            // Always add a "__missing__" sentinel tile so faces whose texture
+            // couldn't be resolved have *something* to sample — otherwise their
+            // UVs stay in local [0,1] space and sample the entire atlas, which
+            // renders as a tiny collapsed strip of the full atlas on the block.
+            atlas_builder.add_texture(MISSING_TEXTURE_KEY.to_string(), make_missing_texture());
+
+            atlas_builder.build()?
+        })
+    }
+
+    /// Union only the cheap metadata (texture refs + dynamic textures) from a set
+    /// of per-chunk partials into this builder — *not* the vertex/index buffers.
+    /// Used by [`build_from_partials`](Self::build_from_partials) so the atlas can
+    /// be built without first copying tens of millions of vertices into one mesh.
+    pub(crate) fn merge_metadata_only(&mut self, partials: &[PartialMesh]) {
+        for p in partials {
+            for t in &p.texture_refs {
+                if !self.texture_refs.contains(t) {
+                    self.texture_refs.insert(t.clone());
+                }
+            }
+            for (k, v) in &p.dynamic_textures {
+                self.dynamic_textures
+                    .entry(k.clone())
+                    .or_insert_with(|| v.clone());
+            }
+        }
+    }
+
+    /// Like [`build`](Self::build), but sources geometry from a list of per-chunk
+    /// [`PartialMesh`]es instead of a single merged mesh. The layer-split reads
+    /// each partial's own buffers directly, so the ~N-million-vertex merge copy is
+    /// skipped entirely (the split is the only vertex copy). Only valid when greedy
+    /// meshing is disabled (the parallel path guarantees this), so there are no
+    /// greedy materials to emit.
+    ///
+    /// `merge_metadata_only` must have been called with these `partials` first so
+    /// the atlas covers every texture they reference.
+    pub(crate) fn build_from_partials(
+        self,
+        partials: Vec<PartialMesh>,
+        pre_built_atlas: Option<TextureAtlas>,
+    ) -> Result<(crate::mesh_output::MeshLayer, crate::mesh_output::MeshLayer, crate::mesh_output::MeshLayer, TextureAtlas, Vec<GreedyMaterial>, Vec<super::AnimatedTextureExport>)>
+    {
+        let _prof = std::env::var("MESHER_PROFILE").is_ok();
+        let _t = super::prof_now();
+        let atlas = self.build_atlas(pre_built_atlas)?;
+        if _prof {
+            eprintln!("MPROFILE\t  build.atlas\t{}", _t.map_or(0, |t| t.elapsed().as_micros()));
+        }
+        let _t = super::prof_now();
+
+        let mut opaque_mesh = crate::mesh_output::MeshLayer::new();
+        let mut cutout_mesh = crate::mesh_output::MeshLayer::new();
+        let mut transparent_mesh = crate::mesh_output::MeshLayer::new();
+        // Pre-size the layer buffers: in the common (mostly-opaque) case nearly
+        // all vertices land in `opaque_mesh`, so reserving the grand total avoids
+        // reallocations without meaningfully over-allocating the small layers.
+        let total_v: usize = partials.iter().map(|p| p.mesh.vertices.len()).sum();
+        let total_i: usize = partials.iter().map(|p| p.mesh.indices.len()).sum();
+        opaque_mesh.reserve(total_v, total_i);
+
+        // Copy the pack reference so the parallel split closures can borrow it
+        // (for per-texture translucency lookup) without capturing `self`.
+        let pack = self.resource_pack;
+
+        // Split each partial into its OWN per-chunk SoA layers in parallel, then
+        // concat. The split is per-vertex compute (UV transform + layer classify),
+        // ~40x above the memory-bandwidth floor, so it parallelizes well; the
+        // final concat is the only bandwidth-bound copy.
+        #[cfg(not(target_arch = "wasm32"))]
+        let per_chunk: Vec<(crate::mesh_output::MeshLayer, crate::mesh_output::MeshLayer, crate::mesh_output::MeshLayer)> = {
+            use rayon::prelude::*;
+            partials
+                .par_iter()
+                .map(|p| {
+                    let mut op = crate::mesh_output::MeshLayer::new();
+                    op.reserve(p.mesh.vertices.len(), p.mesh.indices.len());
+                    let mut cut = crate::mesh_output::MeshLayer::new();
+                    let mut tr = crate::mesh_output::MeshLayer::new();
+                    split_faces_into(&p.mesh.vertices, &p.mesh.indices, &p.face_textures, &atlas, pack, &mut op, &mut cut, &mut tr);
+                    (op, cut, tr)
+                })
+                .collect()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let per_chunk: Vec<(crate::mesh_output::MeshLayer, crate::mesh_output::MeshLayer, crate::mesh_output::MeshLayer)> = partials
+            .iter()
+            .map(|p| {
+                let mut op = crate::mesh_output::MeshLayer::new();
+                let mut cut = crate::mesh_output::MeshLayer::new();
+                let mut tr = crate::mesh_output::MeshLayer::new();
+                split_faces_into(&p.mesh.vertices, &p.mesh.indices, &p.face_textures, &atlas, pack, &mut op, &mut cut, &mut tr);
+                (op, cut, tr)
+            })
+            .collect();
+        for (op, cut, tr) in &per_chunk {
+            opaque_mesh.merge(op);
+            cutout_mesh.merge(cut);
+            transparent_mesh.merge(tr);
+        }
+        if _prof {
+            eprintln!("MPROFILE\t  build.split\t{}", _t.map_or(0, |t| t.elapsed().as_micros()));
+        }
+        let _t = super::prof_now();
+
+        // Greedy materials: each partial already merged & emitted its greedy
+        // quads (per-chunk, before into_partial), so just accumulate them across
+        // partials and finalize. (Faces are not merged across chunk boundaries —
+        // a small, invisible vertex overhead.)
+        let mut greedy_map = std::collections::HashMap::new();
+        for p in &partials {
+            accumulate_greedy_materials(
+                &p.mesh.vertices,
+                &p.mesh.indices,
+                &p.greedy_face_textures,
+                &mut greedy_map,
+            );
+        }
+        let greedy_materials = self.finalize_greedy_materials(greedy_map);
+        if _prof {
+            eprintln!("MPROFILE\t  build.greedy\t{}", _t.map_or(0, |t| t.elapsed().as_micros()));
+        }
+        let _t = super::prof_now();
+
+        let animated_exports = self.collect_dynamic_animated(&atlas);
+        if _prof {
+            eprintln!("MPROFILE\t  build.animated\t{}", _t.map_or(0, |t| t.elapsed().as_micros()));
+        }
+        Ok((
+            opaque_mesh,
+            cutout_mesh,
+            transparent_mesh,
+            atlas,
+            greedy_materials,
+            animated_exports,
+        ))
     }
 
     /// Build per-texture GreedyMaterial meshes from greedy faces.
     /// Groups by (texture_path, ao_pattern) so each AO variant gets its own
     /// baked texture with AO darkening applied at the pixel level.
     fn build_greedy_materials(&self) -> Vec<GreedyMaterial> {
-        use std::collections::HashMap;
+        let mut material_map = std::collections::HashMap::new();
+        accumulate_greedy_materials(
+            &self.mesh.vertices,
+            &self.mesh.indices,
+            &self.greedy_face_textures,
+            &mut material_map,
+        );
+        self.finalize_greedy_materials(material_map)
+    }
 
-        // Group greedy faces by (texture_path, ao_pattern)
-        // This ensures faces with different AO get different baked textures.
-        type MaterialKey = (String, [u8; 4]);
-        let mut material_map: HashMap<MaterialKey, (Mesh, Mesh)> = HashMap::new();
-
-        for face_mapping in &self.greedy_face_textures {
-            let vstart = face_mapping.vertex_start as usize;
-            let istart = face_mapping.index_start;
-
-            if vstart + 4 > self.mesh.vertices.len() || istart + 6 > self.mesh.indices.len() {
-                continue;
-            }
-
-            let key = (face_mapping.texture_path.clone(), face_mapping.ao);
-            let (opaque_mesh, transparent_mesh) = material_map
-                .entry(key)
-                .or_insert_with(|| (Mesh::new(), Mesh::new()));
-
-            let target_mesh = if face_mapping.is_transparent {
-                transparent_mesh
-            } else {
-                opaque_mesh
-            };
-
-            let orig_v0 = face_mapping.vertex_start;
-            let v0 = target_mesh.add_vertex(self.mesh.vertices[vstart]);
-            let v1 = target_mesh.add_vertex(self.mesh.vertices[vstart + 1]);
-            let v2 = target_mesh.add_vertex(self.mesh.vertices[vstart + 2]);
-            let v3 = target_mesh.add_vertex(self.mesh.vertices[vstart + 3]);
-
-            // Directly read the 6 indices (2 triangles) from the tracked position
-            for tri in 0..2 {
-                let base = istart + tri * 3;
-                let i0 = self.mesh.indices[base];
-                let i1 = self.mesh.indices[base + 1];
-                let i2 = self.mesh.indices[base + 2];
-                let new_i0 = match i0 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
-                let new_i1 = match i1 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
-                let new_i2 = match i2 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
-                target_mesh.add_triangle(new_i0, new_i1, new_i2);
-            }
-        }
-
+    /// Turn an accumulated `(texture, AO) -> (opaque, transparent)` map into final
+    /// [`GreedyMaterial`]s, baking AO into the tile texture where AO isn't full.
+    fn finalize_greedy_materials(
+        &self,
+        material_map: std::collections::HashMap<(String, [u8; 4]), (Mesh, Mesh)>,
+    ) -> Vec<GreedyMaterial> {
         let ao_intensity = self.config.ao_intensity;
 
         material_map
@@ -1780,57 +2389,183 @@ impl<'a> MeshBuilder<'a> {
     /// - Opaque: no transparency at all
     /// - Cutout: binary alpha (texture has transparency but vertex alpha ≈ 1.0) — uses MASK mode
     /// - Transparent: semi-transparent (vertex alpha < 1.0, e.g. water) — uses BLEND mode
-    fn separate_by_transparency(&self) -> (Mesh, Mesh, Mesh) {
-        let mut opaque_mesh = Mesh::new();
-        let mut cutout_mesh = Mesh::new();
-        let mut transparent_mesh = Mesh::new();
+    fn separate_by_transparency(
+        &self,
+        atlas: &TextureAtlas,
+    ) -> (
+        crate::mesh_output::MeshLayer,
+        crate::mesh_output::MeshLayer,
+        crate::mesh_output::MeshLayer,
+    ) {
+        let mut opaque_mesh = crate::mesh_output::MeshLayer::new();
+        let mut cutout_mesh = crate::mesh_output::MeshLayer::new();
+        let mut transparent_mesh = crate::mesh_output::MeshLayer::new();
+        split_faces_into(
+            &self.mesh.vertices,
+            &self.mesh.indices,
+            &self.face_textures,
+            atlas,
+            self.resource_pack,
+            &mut opaque_mesh,
+            &mut cutout_mesh,
+            &mut transparent_mesh,
+        );
+        (opaque_mesh, cutout_mesh, transparent_mesh)
+    }
+}
 
-        // Process each face using tracked index positions (O(n) instead of O(n²))
-        for face_mapping in &self.face_textures {
-            let vstart = face_mapping.vertex_start as usize;
-            let istart = face_mapping.index_start;
+/// Copy greedy-merged faces from one buffer into per-`(texture, AO)` material
+/// meshes, accumulating into `material_map`. Shared by the sequential build and
+/// the parallel per-partial build so greedy works on both paths.
+fn accumulate_greedy_materials(
+    vertices: &[Vertex],
+    indices: &[u32],
+    greedy_face_textures: &[GreedyFaceMapping],
+    material_map: &mut std::collections::HashMap<(String, [u8; 4]), (Mesh, Mesh)>,
+) {
+    for face_mapping in greedy_face_textures {
+        let vstart = face_mapping.vertex_start as usize;
+        let istart = face_mapping.index_start;
 
-            // Get the 4 vertices for this face
-            if vstart + 4 > self.mesh.vertices.len() || istart + 6 > self.mesh.indices.len() {
-                continue;
-            }
-
-            let target_mesh = if !face_mapping.is_transparent {
-                &mut opaque_mesh
-            } else {
-                // Check vertex alpha to distinguish cutout from blend:
-                // If any vertex has alpha < 0.99, it's semi-transparent (BLEND).
-                // Otherwise it's binary alpha (CUTOUT/MASK).
-                let has_blend_alpha = (0..4).any(|i| {
-                    self.mesh.vertices[vstart + i].color[3] < 0.99
-                });
-                if has_blend_alpha {
-                    &mut transparent_mesh
-                } else {
-                    &mut cutout_mesh
-                }
-            };
-
-            let orig_v0 = face_mapping.vertex_start;
-            let v0 = target_mesh.add_vertex(self.mesh.vertices[vstart]);
-            let v1 = target_mesh.add_vertex(self.mesh.vertices[vstart + 1]);
-            let v2 = target_mesh.add_vertex(self.mesh.vertices[vstart + 2]);
-            let v3 = target_mesh.add_vertex(self.mesh.vertices[vstart + 3]);
-
-            // Directly read the 6 indices (2 triangles) from the tracked position
-            for tri in 0..2 {
-                let base = istart + tri * 3;
-                let i0 = self.mesh.indices[base];
-                let i1 = self.mesh.indices[base + 1];
-                let i2 = self.mesh.indices[base + 2];
-                let new_i0 = match i0 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
-                let new_i1 = match i1 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
-                let new_i2 = match i2 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
-                target_mesh.add_triangle(new_i0, new_i1, new_i2);
-            }
+        if vstart + 4 > vertices.len() || istart + 6 > indices.len() {
+            continue;
         }
 
-        (opaque_mesh, cutout_mesh, transparent_mesh)
+        let key = (face_mapping.texture_path.clone(), face_mapping.ao);
+        let (opaque_mesh, transparent_mesh) = material_map
+            .entry(key)
+            .or_insert_with(|| (Mesh::new(), Mesh::new()));
+
+        let target_mesh = if face_mapping.is_transparent {
+            transparent_mesh
+        } else {
+            opaque_mesh
+        };
+
+        let orig_v0 = face_mapping.vertex_start;
+        let v0 = target_mesh.add_vertex(vertices[vstart]);
+        let v1 = target_mesh.add_vertex(vertices[vstart + 1]);
+        let v2 = target_mesh.add_vertex(vertices[vstart + 2]);
+        let v3 = target_mesh.add_vertex(vertices[vstart + 3]);
+
+        for tri in 0..2 {
+            let base = istart + tri * 3;
+            let i0 = indices[base];
+            let i1 = indices[base + 1];
+            let i2 = indices[base + 2];
+            let new_i0 = match i0 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+            let new_i1 = match i1 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+            let new_i2 = match i2 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+            target_mesh.add_triangle(new_i0, new_i1, new_i2);
+        }
+    }
+}
+
+/// Split one buffer of faces into opaque/cutout/transparent layer meshes,
+/// applying each face's atlas UV transform during the copy. Appends into the
+/// provided meshes so it can be called once per source buffer (a single merged
+/// mesh, or each per-chunk partial directly — avoiding a merge copy).
+///
+/// The atlas region is memoized across runs of same-textured faces (strong
+/// locality) and always borrowed, never cloned.
+fn split_faces_into(
+    vertices: &[Vertex],
+    indices: &[u32],
+    face_textures: &[FaceTextureMapping],
+    atlas: &TextureAtlas,
+    resource_pack: &ResourcePack,
+    opaque_mesh: &mut crate::mesh_output::MeshLayer,
+    cutout_mesh: &mut crate::mesh_output::MeshLayer,
+    transparent_mesh: &mut crate::mesh_output::MeshLayer,
+) {
+    let missing_region = atlas.get_region(MISSING_TEXTURE_KEY);
+    let mut warned_missing: HashSet<String> = HashSet::new();
+    let mut last_path: Option<&str> = None;
+    let mut last_region = None;
+    // Memoized alongside the atlas region: does this texture have intermediate
+    // alpha (slime, honey, stained glass) -> must alpha-BLEND, not alpha-test.
+    let mut last_translucent = false;
+
+    // Process each face using tracked index positions (O(n) instead of O(n²))
+    for face_mapping in face_textures {
+        let vstart = face_mapping.vertex_start as usize;
+        let istart = face_mapping.index_start;
+
+        // Get the 4 vertices for this face
+        if vstart + 4 > vertices.len() || istart + 6 > indices.len() {
+            continue;
+        }
+
+        if last_path != Some(face_mapping.texture_path.as_str()) {
+            last_region = match atlas.get_region(&face_mapping.texture_path) {
+                Some(r) => Some(r),
+                None => {
+                    if warned_missing.insert(face_mapping.texture_path.clone()) {
+                        eprintln!(
+                            "Warning: no atlas region for texture '{}' — falling back to missing-texture tile",
+                            face_mapping.texture_path,
+                        );
+                    }
+                    missing_region
+                }
+            };
+            last_path = Some(face_mapping.texture_path.as_str());
+            last_translucent = resource_pack
+                .get_texture(&face_mapping.texture_path)
+                .map(|t| t.has_translucency())
+                .unwrap_or(false);
+        }
+        let region = last_region;
+
+        let target_mesh = if !face_mapping.is_transparent {
+            &mut *opaque_mesh
+        } else {
+            // Distinguish cutout (alpha-test) from blend (translucent). A face
+            // blends if EITHER its texture has intermediate alpha (slime, honey,
+            // stained glass) OR a vertex is tinted semi-transparent. Otherwise
+            // its alpha is binary (leaves, glass holes) -> cutout.
+            let has_blend_alpha = (0..4).any(|i| vertices[vstart + i].color[3] < 0.99);
+            if last_translucent || has_blend_alpha {
+                &mut *transparent_mesh
+            } else {
+                &mut *cutout_mesh
+            }
+        };
+
+        // Copy the 4 vertices straight into the target SoA layer, applying the
+        // atlas UV transform during the copy (fused — no separate remap pass, and
+        // no AoS Vertex/Mesh intermediate).
+        let attrs = |i: usize| {
+            let v = &vertices[i];
+            let uv = match region {
+                Some(region) => region.transform_uv(v.uv[0], v.uv[1]),
+                None => v.uv,
+            };
+            (v.position, v.normal, uv, v.color)
+        };
+        let orig_v0 = face_mapping.vertex_start;
+        let (p, n, u, c) = attrs(vstart);
+        let v0 = target_mesh.push_vertex(p, n, u, c);
+        let (p, n, u, c) = attrs(vstart + 1);
+        let v1 = target_mesh.push_vertex(p, n, u, c);
+        let (p, n, u, c) = attrs(vstart + 2);
+        let v2 = target_mesh.push_vertex(p, n, u, c);
+        let (p, n, u, c) = attrs(vstart + 3);
+        let v3 = target_mesh.push_vertex(p, n, u, c);
+
+        // Directly read the 6 indices (2 triangles) from the tracked position
+        for tri in 0..2 {
+            let base = istart + tri * 3;
+            let i0 = indices[base];
+            let i1 = indices[base + 1];
+            let i2 = indices[base + 2];
+            let new_i0 = match i0 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+            let new_i1 = match i1 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+            let new_i2 = match i2 - orig_v0 { 0 => v0, 1 => v1, 2 => v2, _ => v3 };
+            target_mesh.indices.push(new_i0);
+            target_mesh.indices.push(new_i1);
+            target_mesh.indices.push(new_i2);
+        }
     }
 }
 
@@ -1934,6 +2669,54 @@ fn dye_rgb(color: &str) -> [f32; 4] {
         "black" => [0.10, 0.10, 0.13, 1.0],
         _ => [1.0, 1.0, 1.0, 1.0],
     }
+}
+
+/// Composite a pottery sherd pattern on top of the opaque `decorated_pot_side`
+/// texture. Mirrors MC's DecoratedPotRenderer, which draws the pattern as a
+/// second pass over the side. Returns an opaque texture suitable for rendering
+/// directly on a pot's side face without alpha holes.
+fn composite_pot_side(pack: &ResourcePack, pattern: &str) -> Option<TextureData> {
+    let side = pack.get_texture("entity/decorated_pot/decorated_pot_side")?;
+    let side_frame = side.first_frame();
+    let mut pixels = side_frame.pixels.clone();
+    let w = side_frame.width;
+    let h = side_frame.height;
+
+    let pat_path = format!("entity/decorated_pot/{}_pottery_pattern", pattern);
+    if let Some(pat) = pack.get_texture(&pat_path) {
+        let pat_frame = pat.first_frame();
+        let pw = pat_frame.width.min(w);
+        let ph = pat_frame.height.min(h);
+        for y in 0..ph {
+            for x in 0..pw {
+                let src = ((y * pat_frame.width + x) * 4) as usize;
+                let dst = ((y * w + x) * 4) as usize;
+                if src + 3 >= pat_frame.pixels.len() || dst + 3 >= pixels.len() {
+                    continue;
+                }
+                let sa = pat_frame.pixels[src + 3] as f32 / 255.0;
+                if sa < 0.01 {
+                    continue;
+                }
+                for c in 0..3 {
+                    let sv = pat_frame.pixels[src + c] as f32;
+                    let dv = pixels[dst + c] as f32;
+                    pixels[dst + c] = (sv * sa + dv * (1.0 - sa)).min(255.0) as u8;
+                }
+                // Output stays fully opaque — pot side is solid pottery.
+                pixels[dst + 3] = 255;
+            }
+        }
+    }
+
+    Some(TextureData {
+        width: w,
+        height: h,
+        pixels,
+        is_animated: false,
+        frame_count: 1,
+        animation: None,
+    })
 }
 
 #[cfg(test)]

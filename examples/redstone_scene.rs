@@ -197,6 +197,7 @@ fn config() -> MesherConfig {
         enable_sky_light: false,
         sky_light_level: 15,
         enable_particles: true,
+        pre_built_atlas: None,
     }
 }
 

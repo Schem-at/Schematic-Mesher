@@ -14,7 +14,7 @@ use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose};
 pub(super) fn cow_model() -> EntityModelDef {
     let right_horn = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-4.0, -5.0, -4.0],
+            origin: [-5.0, -5.0, -5.0],
             dimensions: [1.0, 3.0, 1.0],
             tex_offset: [22, 0],
             inflate: 0.0,
@@ -27,7 +27,7 @@ pub(super) fn cow_model() -> EntityModelDef {
 
     let left_horn = EntityPart {
         cubes: vec![EntityCube {
-            origin: [3.0, -5.0, -4.0],
+            origin: [4.0, -5.0, -5.0],
             dimensions: [1.0, 3.0, 1.0],
             tex_offset: [22, 0],
             inflate: 0.0,
@@ -39,14 +39,25 @@ pub(super) fn cow_model() -> EntityModelDef {
     };
 
     let head = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-4.0, -4.0, -6.0],
-            dimensions: [8.0, 8.0, 6.0],
-            tex_offset: [0, 0],
-            inflate: 0.0,
-            mirror: false,
-            skip_faces: vec![],
-        }],
+        cubes: vec![
+            EntityCube {
+                origin: [-4.0, -4.0, -6.0],
+                dimensions: [8.0, 8.0, 6.0],
+                tex_offset: [0, 0],
+                inflate: 0.0,
+                mirror: false,
+                skip_faces: vec![],
+            },
+            // Muzzle/snout (added in 1.21.5 for the new biome-variant cow textures).
+            EntityCube {
+                origin: [-3.0, 1.0, -7.0],
+                dimensions: [6.0, 3.0, 1.0],
+                tex_offset: [1, 33],
+                inflate: 0.0,
+                mirror: false,
+                skip_faces: vec![],
+            },
+        ],
         pose: EntityPartPose {
             position: [0.0, 4.0, -8.0],
             ..Default::default()
@@ -55,14 +66,24 @@ pub(super) fn cow_model() -> EntityModelDef {
     };
 
     let body = EntityPart {
-        cubes: vec![EntityCube {
-            origin: [-5.0, -10.0, -7.0],
-            dimensions: [10.0, 16.0, 8.0],
-            tex_offset: [28, 8],
-            inflate: 0.0,
-            mirror: false,
-            skip_faces: vec![],
-        }],
+        cubes: vec![
+            EntityCube {
+                origin: [-6.0, -10.0, -7.0],
+                dimensions: [12.0, 18.0, 10.0],
+                tex_offset: [18, 4],
+                inflate: 0.0,
+                mirror: false,
+                skip_faces: vec![],
+            },
+            EntityCube {
+                origin: [-2.0, 2.0, -8.0],
+                dimensions: [4.0, 6.0, 1.0],
+                tex_offset: [52, 0],
+                inflate: 0.0,
+                mirror: false,
+                skip_faces: vec![],
+            },
+        ],
         pose: EntityPartPose {
             position: [0.0, 5.0, 2.0],
             rotation: [std::f32::consts::FRAC_PI_2, 0.0, 0.0],
@@ -81,7 +102,7 @@ pub(super) fn cow_model() -> EntityModelDef {
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [-3.0, 12.0, 7.0],
+            position: [-4.0, 12.0, 7.0],
             ..Default::default()
         },
         children: vec![],
@@ -97,7 +118,7 @@ pub(super) fn cow_model() -> EntityModelDef {
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [3.0, 12.0, 7.0],
+            position: [4.0, 12.0, 7.0],
             ..Default::default()
         },
         children: vec![],
@@ -113,7 +134,7 @@ pub(super) fn cow_model() -> EntityModelDef {
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [-3.0, 12.0, -5.0],
+            position: [-4.0, 12.0, -5.0],
             ..Default::default()
         },
         children: vec![],
@@ -129,7 +150,7 @@ pub(super) fn cow_model() -> EntityModelDef {
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [3.0, 12.0, -5.0],
+            position: [4.0, 12.0, -5.0],
             ..Default::default()
         },
         children: vec![],
@@ -148,7 +169,9 @@ pub(super) fn cow_model() -> EntityModelDef {
 
     EntityModelDef {
         texture_path: "entity/cow/temperate_cow".to_string(),
-        texture_size: [64, 32],
+        // Pack's temperate_cow.png is 64x64 (MC 1.21.5+). CowModel.java still uses
+        // 64x32 pixel coords, but UVs normalize against the actual image size.
+        texture_size: [64, 64],
         parts: vec![root],
         is_opaque: true,
     }

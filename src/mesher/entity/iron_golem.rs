@@ -133,12 +133,13 @@ pub(super) fn iron_golem_model() -> EntityModelDef {
         children: vec![],
     };
 
-    // Y-down → Y-up root wrapper
-    // Iron golem is ~2.7 blocks tall
+    // Y-down → Y-up root wrapper. Iron golem feet land at model-local Y=24:
+    // leg pose.Y (11) + leg cube max (cube Y-range -3..13 → +13) = 24. Using
+    // 43 puts the golem floating 19/16 blocks above the ground.
     let root = EntityPart {
         cubes: vec![],
         pose: EntityPartPose {
-            position: [8.0, 43.0, 8.0],
+            position: [8.0, 24.0, 8.0],
             rotation: [std::f32::consts::PI, 0.0, 0.0],
             ..Default::default()
         },

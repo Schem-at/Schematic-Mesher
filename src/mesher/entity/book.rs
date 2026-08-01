@@ -1,15 +1,21 @@
 use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose};
 
 /// Book model for lecterns and enchanting tables (64x32 texture).
-/// Based on Minecraft's BookModel.java — 7 parts forming an open book.
-///
-/// Lids are open at ~70° (rotY = ±1.2 radians). Flip pages follow their
-/// respective side. Pages have a small depth (0.005) to avoid z-fighting.
+/// Cube geometry from BookModel.java (MC 1.21.5); static pose baked from
+/// `setupAnim(_, f2, f3, f4=1)` — i.e. the book fully open at rest.
 pub(super) fn book_model() -> EntityModelDef {
-    // Left lid: texOffs(0,0), origin [-6,-5,0], dims [6,10,0.005], posed at (0,0,-1), rotY=+1.2
+    // MC setupAnim: f5 = (sin(time*0.02)*0.1 + 1.25) * f4, static f4=1 ⇒ f5≈1.25.
+    const F5: f32 = 1.25;
+    const SIN_F5: f32 = 0.9489846;
+    // Page flip fractions — pick small asymmetric values so flip pages don't
+    // coincide with each other or with the page stacks (prevents z-fighting).
+    const F2: f32 = 0.1;
+    const F3: f32 = 0.9;
+
+    // Left lid: yRot = PI + f5.
     let left_lid = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-6.0, -5.0, 0.0],
+            origin: [-6.0, -5.0, -0.005],
             dimensions: [6.0, 10.0, 0.005],
             tex_offset: [0, 0],
             inflate: 0.0,
@@ -18,16 +24,16 @@ pub(super) fn book_model() -> EntityModelDef {
         }],
         pose: EntityPartPose {
             position: [0.0, 0.0, -1.0],
-            rotation: [0.0, 1.2, 0.0],
+            rotation: [0.0, std::f32::consts::PI + F5, 0.0],
             ..Default::default()
         },
         children: vec![],
     };
 
-    // Right lid: texOffs(16,0), origin [0,-5,0], dims [6,10,0.005], posed at (0,0,1), rotY=-1.2
+    // Right lid: yRot = -f5.
     let right_lid = EntityPart {
         cubes: vec![EntityCube {
-            origin: [0.0, -5.0, 0.0],
+            origin: [0.0, -5.0, -0.005],
             dimensions: [6.0, 10.0, 0.005],
             tex_offset: [16, 0],
             inflate: 0.0,
@@ -36,13 +42,13 @@ pub(super) fn book_model() -> EntityModelDef {
         }],
         pose: EntityPartPose {
             position: [0.0, 0.0, 1.0],
-            rotation: [0.0, -1.2, 0.0],
+            rotation: [0.0, -F5, 0.0],
             ..Default::default()
         },
         children: vec![],
     };
 
-    // Seam (spine): texOffs(12,0), origin [-1,-5,0], dims [2,10,0.005], at origin
+    // Seam (spine): has a base PartPose rotation of (0, PI/2, 0) in MC.
     let seam = EntityPart {
         cubes: vec![EntityCube {
             origin: [-1.0, -5.0, 0.0],
@@ -52,14 +58,17 @@ pub(super) fn book_model() -> EntityModelDef {
             mirror: false,
             skip_faces: vec![],
         }],
-        pose: Default::default(),
+        pose: EntityPartPose {
+            rotation: [0.0, std::f32::consts::FRAC_PI_2, 0.0],
+            ..Default::default()
+        },
         children: vec![],
     };
 
-    // Left pages: texOffs(0,10), origin [0,-4,-1], dims [5,8,1], posed at (0,0,-1), rotY=+1.2
+    // Left pages: yRot = f5, x = sin(f5).
     let left_pages = EntityPart {
         cubes: vec![EntityCube {
-            origin: [0.0, -4.0, -1.0],
+            origin: [0.0, -4.0, -0.99],
             dimensions: [5.0, 8.0, 1.0],
             tex_offset: [0, 10],
             inflate: 0.0,
@@ -67,17 +76,17 @@ pub(super) fn book_model() -> EntityModelDef {
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [0.0, 0.0, -1.0],
-            rotation: [0.0, 1.2, 0.0],
+            position: [SIN_F5, 0.0, 0.0],
+            rotation: [0.0, F5, 0.0],
             ..Default::default()
         },
         children: vec![],
     };
 
-    // Right pages: texOffs(12,10), origin [0,-4,0], dims [5,8,1], posed at (0,0,1), rotY=-1.2
+    // Right pages: yRot = -f5, x = sin(f5).
     let right_pages = EntityPart {
         cubes: vec![EntityCube {
-            origin: [0.0, -4.0, 0.0],
+            origin: [0.0, -4.0, -0.01],
             dimensions: [5.0, 8.0, 1.0],
             tex_offset: [12, 10],
             inflate: 0.0,
@@ -85,14 +94,14 @@ pub(super) fn book_model() -> EntityModelDef {
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [0.0, 0.0, 1.0],
-            rotation: [0.0, -1.2, 0.0],
+            position: [SIN_F5, 0.0, 0.0],
+            rotation: [0.0, -F5, 0.0],
             ..Default::default()
         },
         children: vec![],
     };
 
-    // Flip page 1: texOffs(24,10), origin [0,-4,0], dims [5,8,0.005], posed at (0,0,-1), rotY=+1.2
+    // Flip pages: yRot = f5 - f5*2*flipAmount, x = sin(f5).
     let flip_page1 = EntityPart {
         cubes: vec![EntityCube {
             origin: [0.0, -4.0, 0.0],
@@ -103,14 +112,13 @@ pub(super) fn book_model() -> EntityModelDef {
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [0.0, 0.0, -1.0],
-            rotation: [0.0, 1.2, 0.0],
+            position: [SIN_F5, 0.0, 0.0],
+            rotation: [0.0, F5 - F5 * 2.0 * F2, 0.0],
             ..Default::default()
         },
         children: vec![],
     };
 
-    // Flip page 2: texOffs(24,10), origin [0,-4,0], dims [5,8,0.005], posed at (0,0,1), rotY=-1.2
     let flip_page2 = EntityPart {
         cubes: vec![EntityCube {
             origin: [0.0, -4.0, 0.0],
@@ -121,8 +129,8 @@ pub(super) fn book_model() -> EntityModelDef {
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [0.0, 0.0, 1.0],
-            rotation: [0.0, -1.2, 0.0],
+            position: [SIN_F5, 0.0, 0.0],
+            rotation: [0.0, F5 - F5 * 2.0 * F3, 0.0],
             ..Default::default()
         },
         children: vec![],

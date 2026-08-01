@@ -1,6 +1,6 @@
 [package]
 name = "schematic-mesher"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Generate 3D meshes from Minecraft schematics and block data"
@@ -9,7 +9,7 @@ keywords = ["minecraft", "mesh", "gltf", "voxel", "schematic"]
 categories = ["rendering", "game-development"]
 readme = "README.md"
 authors = ["Nano nano@schem.at"]
-exclude = ["web/", "examples/", "minecraft-src/"]
+exclude = ["web/", "examples/", "minecraft-src/", "tools/", "todo.md"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -44,6 +44,9 @@ gltf-json = { version = "1.4", features = ["extras"] }
 # Math utilities
 glam = "0.27"
 
+# Fast non-cryptographic hashing for the hot per-block maps (BlockPosition keys).
+rustc-hash = "2"
+
 # CLI (optional)
 clap = { version = "4.5", features = ["derive"], optional = true }
 
@@ -52,6 +55,11 @@ wasm-bindgen = { version = "=0.2.99", optional = true }
 js-sys = { version = "=0.3.76", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 
+# Data-parallel meshing (native only — wasm has no threads). The mesher falls
+# back to a sequential loop when this isn't present (see mesher::mesh_blocks_internal).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1"
+
 [dev-dependencies]
 tempfile = "3.0"
-nucleation = { path = "/Users/harrison/RustroverProjects/Nucleation", default-features = false }
+nucleation = { git = "https://github.com/Schem-at/Nucleation.git", default-features = false }

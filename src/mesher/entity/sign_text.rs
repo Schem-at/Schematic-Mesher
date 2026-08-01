@@ -171,18 +171,32 @@ fn load_font(rp: &ResourcePack) -> Option<FontData> {
     Some(FontData { pixels, width, height, glyph_widths, cell_w, cell_h })
 }
 
+/// Sign kind, determines which UV region in the base texture holds the visible
+/// board face (and therefore where text should be written).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignKind {
+    /// Standing sign — 24x12x2 board at tex_offs(0,0). Text on North face.
+    Standing,
+    /// Wall sign — same board, but pushed against the wall so the visible face
+    /// is the board's South face in the UV layout.
+    Wall,
+    /// Hanging sign — 14x10x2 board at tex_offs(0,12). Different UV rows.
+    Hanging,
+}
+
 /// Composite sign text onto the sign board texture.
 ///
-/// Returns a 4x upscaled sign texture (256x128 for a 64x32 base) with text
-/// rendered onto the north face region using the resource pack's font.
-///
-/// Supports JSON text components with per-segment colors and glow outlines.
+/// Returns a 4x upscaled sign texture with text rendered onto the appropriate
+/// board face region(s) for the given `kind`. For wall and hanging signs this
+/// also writes the text onto the mirrored face so it's visible from either
+/// side (MC draws the text as a separate billboard; we fake it on both faces).
 pub(crate) fn composite_sign_with_text(
     rp: &ResourcePack,
     base_texture_path: &str,
     lines: &[&str],
     color: &str,
     glowing: bool,
+    kind: SignKind,
 ) -> Option<TextureData> {
     let base_tex = rp.get_texture(base_texture_path)?;
     let font = load_font(rp)?;
@@ -205,47 +219,67 @@ pub(crate) fn composite_sign_with_text(
         }
     }
 
-    // Sign board north face region in base texture: [2, 2] to [26, 14]
-    // At 4x scale: [8, 8] to [104, 56]
-    let text_x0 = 2 * scale;
-    let text_y0 = 2 * scale;
-    let text_w = 24 * scale; // 96 pixels wide
-    let text_h = 12 * scale; // 48 pixels tall
+    // Text regions (x0, y0, width, height) in base-texture pixels. One region
+    // per face we want to cover; wall/hanging signs get two so either side is
+    // readable. Values map from the cube-face UV layout in `cube_face_uvs`.
+    //
+    // Standing sign board: tex_offs(0,0), dim(24, 12, 2) → N=(2,2,24,12), S=(28,2,24,12)
+    // Hanging sign board:  tex_offs(0,12), dim(14,10, 2) → N=(2,14,14,10), S=(18,14,14,10)
+    let regions: &[(u32, u32, u32, u32)] = match kind {
+        SignKind::Standing => &[(2, 2, 24, 12)],
+        SignKind::Wall     => &[(2, 2, 24, 12), (28, 2, 24, 12)],
+        SignKind::Hanging  => &[(2, 14, 14, 10), (18, 14, 14, 10)],
+    };
 
-    // Render up to 4 text lines
-    let line_height = text_h / 4; // 12 pixels per line
-    let glyph_scale = line_height.min(font.cell_h * scale / 2) / font.cell_h;
+    // Count non-empty lines so we can vertically center the text block — MC
+    // centers text on the sign regardless of how many of the 4 slots are used.
+    let non_empty = lines.iter().take(4).filter(|l| !l.is_empty()).count().max(1) as u32;
 
-    for (line_idx, &line) in lines.iter().enumerate().take(4) {
-        if line.is_empty() {
-            continue;
+    for &(rx, ry, rw, rh) in regions {
+        let text_x0 = rx * scale;
+        let text_y0 = ry * scale;
+        let text_w = rw * scale;
+        let text_h = rh * scale;
+
+        let line_height = text_h / 4;
+        let glyph_scale = line_height.min(font.cell_h * scale / 2) / font.cell_h;
+
+        // Vertical offset so the `non_empty` lines are centered in the region.
+        let v_offset = (4u32.saturating_sub(non_empty)) * line_height / 2;
+
+        // Enumerate only non-empty lines so they stack at the top of the block;
+        // then v_offset centers the block in the region.
+        let mut visible_idx = 0u32;
+        for &line in lines.iter().take(4) {
+            if line.is_empty() {
+                continue;
+            }
+
+            let y_start = text_y0 + v_offset + visible_idx * line_height;
+            visible_idx += 1;
+
+            let segments = parse_text_component(line, color);
+            if segments.is_empty() {
+                continue;
+            }
+
+            let total_width = segments_width(&segments, &font, glyph_scale);
+
+            let x_offset = if total_width < text_w {
+                text_x0 + (text_w - total_width) / 2
+            } else {
+                text_x0
+            };
+
+            render_segments(
+                &mut pixels, out_w,
+                &font, glyph_scale,
+                &segments,
+                x_offset, y_start,
+                text_x0 + text_w,
+                glowing,
+            );
         }
-
-        let y_start = text_y0 + line_idx as u32 * line_height;
-
-        // Parse line into text segments
-        let segments = parse_text_component(line, color);
-        if segments.is_empty() {
-            continue;
-        }
-
-        // Calculate total line width for centering
-        let total_width = segments_width(&segments, &font, glyph_scale);
-
-        let x_offset = if total_width < text_w {
-            text_x0 + (text_w - total_width) / 2
-        } else {
-            text_x0
-        };
-
-        render_segments(
-            &mut pixels, out_w,
-            &font, glyph_scale,
-            &segments,
-            x_offset, y_start,
-            text_x0 + text_w,
-            glowing,
-        );
     }
 
     Some(TextureData {

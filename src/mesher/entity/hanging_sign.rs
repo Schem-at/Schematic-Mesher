@@ -30,12 +30,15 @@ pub(crate) fn hanging_sign_texture_path(wood: SignWood) -> &'static str {
 pub(super) fn hanging_sign_model(wood: SignWood, is_wall: bool) -> EntityModelDef {
     let texture_path = hanging_sign_texture_path(wood);
 
+    // MC's translateBase is translate(0.5, 0.9375, 0.5) + translate(0, -0.3125, 0)
+    // = final (0.5, 0.625, 0.5) block-local. In MC units: (8, 10, 8).
     let (pos_x, pos_y, pos_z) = if is_wall {
-        (8.0, 3.0, 15.0)
+        (8.0, 10.0, 15.0)
     } else {
-        (8.0, 8.0, 8.0)
+        (8.0, 10.0, 8.0)
     };
-    let scale = 2.0 / 3.0;
+    // MC's HangingSignRenderer MODEL_RENDER_SCALE = 1.0 (regular signs use 2/3).
+    let scale = 1.0;
 
     // Board: origin [-7, 0, -1], dims [14, 10, 2], texOffs(0, 12)
     let board = EntityPart {
@@ -130,19 +133,21 @@ pub(super) fn hanging_sign_model(wood: SignWood, is_wall: bool) -> EntityModelDe
 /// Hanging sign model with custom (dynamic) texture path and 4x upscaled texture_size.
 /// Used when text is composited onto the hanging sign texture.
 pub(crate) fn hanging_sign_model_upscaled(custom_texture: &str, is_wall: bool) -> EntityModelDef {
+    // MC's translateBase is translate(0.5, 0.9375, 0.5) + translate(0, -0.3125, 0)
+    // = final (0.5, 0.625, 0.5) block-local. In MC units: (8, 10, 8).
     let (pos_x, pos_y, pos_z) = if is_wall {
-        (8.0, 3.0, 15.0)
+        (8.0, 10.0, 15.0)
     } else {
-        (8.0, 8.0, 8.0)
+        (8.0, 10.0, 8.0)
     };
-    let scale = 2.0 / 3.0;
+    // MC's HangingSignRenderer MODEL_RENDER_SCALE = 1.0 (regular signs use 2/3).
+    let scale = 1.0;
 
-    // Board with 4x tex_offset: [0,12] → [0,48]
     let board = EntityPart {
         cubes: vec![EntityCube {
             origin: [-7.0, 0.0, -1.0],
             dimensions: [14.0, 10.0, 2.0],
-            tex_offset: [0, 12 * 4],
+            tex_offset: [0, 12],
             inflate: 0.0,
             mirror: false,
             skip_faces: vec![],
@@ -158,7 +163,6 @@ pub(crate) fn hanging_sign_model_upscaled(custom_texture: &str, is_wall: bool) -
     let mut parts = vec![board];
 
     if !is_wall {
-        // Plank: texOffs [0,0] → [0,0]
         let plank = EntityPart {
             cubes: vec![EntityCube {
                 origin: [-8.0, -6.0, -2.0],
@@ -177,12 +181,11 @@ pub(crate) fn hanging_sign_model_upscaled(custom_texture: &str, is_wall: bool) -
         };
         parts.push(plank);
 
-        // Chain segments: texOffs [0,6] → [0,24]
         let left_chain = EntityPart {
             cubes: vec![EntityCube {
                 origin: [-6.0, -6.0, -1.0],
                 dimensions: [2.0, 6.0, 2.0],
-                tex_offset: [0, 6 * 4],
+                tex_offset: [0, 6],
                 inflate: 0.0,
                 mirror: false,
                 skip_faces: vec![],
@@ -198,7 +201,7 @@ pub(crate) fn hanging_sign_model_upscaled(custom_texture: &str, is_wall: bool) -
             cubes: vec![EntityCube {
                 origin: [4.0, -6.0, -1.0],
                 dimensions: [2.0, 6.0, 2.0],
-                tex_offset: [0, 6 * 4],
+                tex_offset: [0, 6],
                 inflate: 0.0,
                 mirror: true,
                 skip_faces: vec![],
@@ -216,7 +219,7 @@ pub(crate) fn hanging_sign_model_upscaled(custom_texture: &str, is_wall: bool) -
 
     EntityModelDef {
         texture_path: custom_texture.to_string(),
-        texture_size: [64 * 4, 32 * 4],
+        texture_size: [64, 32],
         parts,
         is_opaque: true,
     }

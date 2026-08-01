@@ -312,6 +312,7 @@ fn main() {
                 enable_sky_light: false,
                 sky_light_level: 15,
                 enable_particles: false,
+                pre_built_atlas: None,
             },
         ),
         (
@@ -330,6 +331,7 @@ fn main() {
                 enable_sky_light: false,
                 sky_light_level: 15,
                 enable_particles: false,
+                pre_built_atlas: None,
             },
         ),
     ];

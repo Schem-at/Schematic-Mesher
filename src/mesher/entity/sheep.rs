@@ -8,17 +8,18 @@ use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose};
 ///   body: [-5,-10,-7] 10x16x8 tex(28,8) at pos(0, 5, 2) RotX(pi/2)
 ///   legs: [-2,0,-2] 4x12x4 tex(0,16) at y=12
 pub(super) fn sheep_model() -> EntityModelDef {
+    // Sheep overrides QuadrupedModel's head and body with smaller dims.
     let head = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-4.0, -4.0, -8.0],
-            dimensions: [8.0, 8.0, 8.0],
+            origin: [-3.0, -4.0, -6.0],
+            dimensions: [6.0, 6.0, 8.0],
             tex_offset: [0, 0],
             inflate: 0.0,
             mirror: false,
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [0.0, 6.0, -6.0],
+            position: [0.0, 6.0, -8.0],
             ..Default::default()
         },
         children: vec![],
@@ -26,8 +27,8 @@ pub(super) fn sheep_model() -> EntityModelDef {
 
     let body = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-5.0, -10.0, -7.0],
-            dimensions: [10.0, 16.0, 8.0],
+            origin: [-4.0, -10.0, -7.0],
+            dimensions: [8.0, 16.0, 6.0],
             tex_offset: [28, 8],
             inflate: 0.0,
             mirror: false,
@@ -134,17 +135,18 @@ pub(super) fn sheep_model() -> EntityModelDef {
 ///
 /// Wool is tinted by dye color via vertex colors.
 pub(crate) fn sheep_wool_model() -> EntityModelDef {
+    // Wool overlay per SheepFurModel: head 6x6x6 (not 6x6x8!), legs only 6 tall.
     let head = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-4.0, -4.0, -8.0],
-            dimensions: [8.0, 8.0, 8.0],
+            origin: [-3.0, -4.0, -4.0],
+            dimensions: [6.0, 6.0, 6.0],
             tex_offset: [0, 0],
             inflate: 0.6,
             mirror: false,
             skip_faces: vec![],
         }],
         pose: EntityPartPose {
-            position: [0.0, 6.0, -6.0],
+            position: [0.0, 6.0, -8.0],
             ..Default::default()
         },
         children: vec![],
@@ -152,8 +154,8 @@ pub(crate) fn sheep_wool_model() -> EntityModelDef {
 
     let body = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-5.0, -10.0, -7.0],
-            dimensions: [10.0, 16.0, 8.0],
+            origin: [-4.0, -10.0, -7.0],
+            dimensions: [8.0, 16.0, 6.0],
             tex_offset: [28, 8],
             inflate: 1.75,
             mirror: false,
@@ -170,7 +172,7 @@ pub(crate) fn sheep_wool_model() -> EntityModelDef {
     let right_hind_leg = EntityPart {
         cubes: vec![EntityCube {
             origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 12.0, 4.0],
+            dimensions: [4.0, 6.0, 4.0],
             tex_offset: [0, 16],
             inflate: 0.5,
             mirror: false,
@@ -186,7 +188,7 @@ pub(crate) fn sheep_wool_model() -> EntityModelDef {
     let left_hind_leg = EntityPart {
         cubes: vec![EntityCube {
             origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 12.0, 4.0],
+            dimensions: [4.0, 6.0, 4.0],
             tex_offset: [0, 16],
             inflate: 0.5,
             mirror: false,
@@ -202,7 +204,7 @@ pub(crate) fn sheep_wool_model() -> EntityModelDef {
     let right_front_leg = EntityPart {
         cubes: vec![EntityCube {
             origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 12.0, 4.0],
+            dimensions: [4.0, 6.0, 4.0],
             tex_offset: [0, 16],
             inflate: 0.5,
             mirror: false,
@@ -218,7 +220,7 @@ pub(crate) fn sheep_wool_model() -> EntityModelDef {
     let left_front_leg = EntityPart {
         cubes: vec![EntityCube {
             origin: [-2.0, 0.0, -2.0],
-            dimensions: [4.0, 12.0, 4.0],
+            dimensions: [4.0, 6.0, 4.0],
             tex_offset: [0, 16],
             inflate: 0.5,
             mirror: false,

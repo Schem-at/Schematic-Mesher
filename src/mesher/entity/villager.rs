@@ -177,7 +177,9 @@ pub(super) fn villager_model() -> EntityModelDef {
     };
 
     EntityModelDef {
-        texture_path: "entity/villager/type/plains".to_string(),
+        // Base villager skin (contains head). `entity/villager/type/<biome>` is a
+        // biome overlay with no head data; it's meant to be layered onto this base.
+        texture_path: "entity/villager/villager".to_string(),
         texture_size: [64, 64],
         parts: vec![root],
         is_opaque: false, // Hat overlay has transparent pixels

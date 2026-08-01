@@ -89,11 +89,14 @@ pub(super) fn minecart_model() -> EntityModelDef {
 
     // Y-down → Y-up root wrapper.
     // Position [8, 6, 8]: centers X/Z at block center, Y=6 gives 6/16 = 0.375 lift.
+    // Y rotation PI/2 aligns the minecart's intrinsic "front" (-X in MC coords)
+    // with the +Z (south) direction used by humanoid mob models — so
+    // `facing_rotation_rad` applies consistently for both the cart and its rider.
     let root = EntityPart {
         cubes: vec![],
         pose: EntityPartPose {
             position: [8.0, 6.0, 8.0],
-            rotation: [std::f32::consts::PI, 0.0, 0.0],
+            rotation: [std::f32::consts::PI, std::f32::consts::FRAC_PI_2, 0.0],
             ..Default::default()
         },
         children: vec![bottom, front, back, left, right],

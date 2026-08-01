@@ -11,10 +11,12 @@ use std::fmt::Write;
 /// Returns (obj_content, mtl_content) as strings.
 /// Greedy materials get separate MTL entries referencing individual texture files.
 pub fn export_obj(output: &MesherOutput, name: &str) -> Result<(String, String)> {
-    // Combine atlas-based meshes
-    let mut atlas_mesh = output.opaque_mesh.clone();
-    atlas_mesh.merge(&output.cutout_mesh);
-    atlas_mesh.merge(&output.transparent_mesh);
+    // Combine atlas-based meshes. Layers are SoA (MeshLayer); the OBJ writer
+    // below works on AoS Mesh, so convert at the boundary.
+    use crate::mesh_output::layer_to_internal_mesh;
+    let mut atlas_mesh = layer_to_internal_mesh(&output.opaque_mesh);
+    atlas_mesh.merge(&layer_to_internal_mesh(&output.cutout_mesh));
+    atlas_mesh.merge(&layer_to_internal_mesh(&output.transparent_mesh));
 
     let total_verts = output.total_vertices();
     let total_tris = output.total_triangles();

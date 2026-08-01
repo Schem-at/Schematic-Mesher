@@ -91,18 +91,20 @@ pub fn export_usda(output: &MesherOutput) -> Result<UsdaExport> {
         });
     }
 
-    // Atlas-based meshes
+    // Atlas-based meshes. Output layers are SoA (MeshLayer); the writer works on
+    // AoS Mesh, so convert at the boundary.
+    use crate::mesh_output::layer_to_internal_mesh;
     if !output.opaque_mesh.is_empty() {
-        write_mesh_prim(&mut usda, "opaque", &output.opaque_mesh, "atlas_opaque");
+        write_mesh_prim(&mut usda, "opaque", &layer_to_internal_mesh(&output.opaque_mesh), "atlas_opaque");
     }
     if !output.cutout_mesh.is_empty() {
-        write_mesh_prim(&mut usda, "cutout", &output.cutout_mesh, "atlas_opaque");
+        write_mesh_prim(&mut usda, "cutout", &layer_to_internal_mesh(&output.cutout_mesh), "atlas_opaque");
     }
     if !output.transparent_mesh.is_empty() {
         write_mesh_prim(
             &mut usda,
             "transparent",
-            &output.transparent_mesh,
+            &layer_to_internal_mesh(&output.transparent_mesh),
             "atlas_transparent",
         );
     }

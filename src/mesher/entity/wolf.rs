@@ -5,7 +5,7 @@ use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose};
 pub(super) fn wolf_model() -> EntityModelDef {
     let right_ear = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-3.0, -3.0, 0.0],
+            origin: [-2.0, -5.0, 0.0],
             dimensions: [2.0, 2.0, 1.0],
             tex_offset: [16, 14],
             inflate: 0.0,
@@ -18,7 +18,7 @@ pub(super) fn wolf_model() -> EntityModelDef {
 
     let left_ear = EntityPart {
         cubes: vec![EntityCube {
-            origin: [1.0, -3.0, 0.0],
+            origin: [2.0, -5.0, 0.0],
             dimensions: [2.0, 2.0, 1.0],
             tex_offset: [16, 14],
             inflate: 0.0,
@@ -29,10 +29,9 @@ pub(super) fn wolf_model() -> EntityModelDef {
         children: vec![],
     };
 
-    // Snout child
     let snout = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-1.5, 0.0, -5.0],
+            origin: [-0.5, -0.001, -5.0],
             dimensions: [3.0, 3.0, 4.0],
             tex_offset: [0, 10],
             inflate: 0.0,
@@ -76,9 +75,11 @@ pub(super) fn wolf_model() -> EntityModelDef {
         children: vec![],
     };
 
+    // Tail cube extends from pivot along +X (box origin x=0). MC's wolf tail
+    // is tilted down ~36° (0.62831855 rad) around X.
     let tail = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-1.0, 0.0, -1.0],
+            origin: [0.0, 0.0, -1.0],
             dimensions: [2.0, 8.0, 2.0],
             tex_offset: [9, 18],
             inflate: 0.0,
@@ -87,6 +88,25 @@ pub(super) fn wolf_model() -> EntityModelDef {
         }],
         pose: EntityPartPose {
             position: [-1.0, 12.0, 8.0],
+            rotation: [0.62831855, 0.0, 0.0],
+            ..Default::default()
+        },
+        children: vec![],
+    };
+
+    // Upper body (chest/shoulders) — missing in the old port.
+    let upper_body = EntityPart {
+        cubes: vec![EntityCube {
+            origin: [-3.0, -3.0, -3.0],
+            dimensions: [8.0, 6.0, 7.0],
+            tex_offset: [21, 0],
+            inflate: 0.0,
+            mirror: false,
+            skip_faces: vec![],
+        }],
+        pose: EntityPartPose {
+            position: [-1.0, 14.0, -3.0],
+            rotation: [std::f32::consts::FRAC_PI_2, 0.0, 0.0],
             ..Default::default()
         },
         children: vec![],
@@ -94,7 +114,7 @@ pub(super) fn wolf_model() -> EntityModelDef {
 
     let right_hind_leg = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-1.0, 0.0, -1.0],
+            origin: [0.0, 0.0, -1.0],
             dimensions: [2.0, 8.0, 2.0],
             tex_offset: [0, 18],
             inflate: 0.0,
@@ -110,7 +130,7 @@ pub(super) fn wolf_model() -> EntityModelDef {
 
     let left_hind_leg = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-1.0, 0.0, -1.0],
+            origin: [0.0, 0.0, -1.0],
             dimensions: [2.0, 8.0, 2.0],
             tex_offset: [0, 18],
             inflate: 0.0,
@@ -126,7 +146,7 @@ pub(super) fn wolf_model() -> EntityModelDef {
 
     let right_front_leg = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-1.0, 0.0, -1.0],
+            origin: [0.0, 0.0, -1.0],
             dimensions: [2.0, 8.0, 2.0],
             tex_offset: [0, 18],
             inflate: 0.0,
@@ -142,7 +162,7 @@ pub(super) fn wolf_model() -> EntityModelDef {
 
     let left_front_leg = EntityPart {
         cubes: vec![EntityCube {
-            origin: [-1.0, 0.0, -1.0],
+            origin: [0.0, 0.0, -1.0],
             dimensions: [2.0, 8.0, 2.0],
             tex_offset: [0, 18],
             inflate: 0.0,
@@ -165,7 +185,7 @@ pub(super) fn wolf_model() -> EntityModelDef {
             ..Default::default()
         },
         children: vec![
-            head, body, tail,
+            head, body, upper_body, tail,
             right_hind_leg, left_hind_leg, right_front_leg, left_front_leg,
         ],
     };
