@@ -37,6 +37,9 @@ pub(crate) mod skull;
 pub(crate) mod villager_texture;
 pub(crate) mod boat;
 pub(crate) mod equipment;
+mod blaze;
+mod ghast;
+mod magma_cube;
 mod slime;
 mod spider;
 mod villager;
@@ -175,6 +178,10 @@ pub enum MobType {
     Horse,
     Enderman,
     Slime,
+    MagmaCube,
+    Blaze,
+    Ghast,
+    WitherSkeleton,
     IronGolem,
     Bat,
     Player,
@@ -360,6 +367,10 @@ pub fn detect_mob(block: &InputBlock) -> Option<MobType> {
         "horse" => Some(MobType::Horse),
         "enderman" => Some(MobType::Enderman),
         "slime" => Some(MobType::Slime),
+        "magma_cube" => Some(MobType::MagmaCube),
+        "blaze" => Some(MobType::Blaze),
+        "ghast" | "happy_ghast" => Some(MobType::Ghast),
+        "wither_skeleton" => Some(MobType::WitherSkeleton),
         "iron_golem" => Some(MobType::IronGolem),
         "bat" => Some(MobType::Bat),
         "player" => Some(MobType::Player),

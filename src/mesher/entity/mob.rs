@@ -10,6 +10,9 @@ use super::horse;
 use super::iron_golem;
 use super::minecart;
 use super::sheep;
+use super::blaze;
+use super::ghast;
+use super::magma_cube;
 use super::slime;
 use super::spider;
 use super::villager;
@@ -34,6 +37,16 @@ pub(crate) fn build_mob_model(mob_type: MobType, block: &InputBlock) -> EntityMo
         MobType::Horse => horse::horse_model(),
         MobType::Enderman => enderman::enderman_model(),
         MobType::Slime => slime::slime_model(),
+        MobType::MagmaCube => magma_cube::magma_cube_model(),
+        MobType::Blaze => blaze::blaze_model(),
+        MobType::Ghast => ghast::ghast_model(),
+        MobType::WitherSkeleton => {
+            // The skeleton's build with the wither skeleton's skin — how
+            // vanilla draws it too, modulo the 1.2x renderer scale.
+            let mut model = skeleton_model();
+            model.texture_path = "entity/skeleton/wither_skeleton".to_string();
+            model
+        }
         MobType::IronGolem => iron_golem::iron_golem_model(),
         MobType::Bat => bat::bat_model(),
         MobType::Boat => boat::boat_model(
