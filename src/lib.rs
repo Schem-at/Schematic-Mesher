@@ -148,40 +148,43 @@
 //! )?;
 //! ```
 
-pub mod error;
-pub mod types;
-pub mod resource_pack;
-pub mod resolver;
-pub mod mesher;
+pub mod animate;
 pub mod atlas;
+pub mod error;
 pub mod export;
 pub mod mesh_output;
-pub mod animate;
+pub mod mesher;
+pub mod resolver;
+pub mod resource_pack;
+pub mod types;
 
 // --- Core types ---
-pub use error::{MesherError, Result};
-pub use types::{Direction, Axis, BlockPosition, BoundingBox, InputBlock, BlockSource};
-pub use resource_pack::{ResourcePack, BlockModel, ModelElement, BlockstateDefinition};
 pub use atlas::{AtlasBuilder, AtlasRegion, TextureAtlas};
+pub use error::{MesherError, Result};
+pub use resource_pack::{BlockModel, BlockstateDefinition, ModelElement, ResourcePack};
+pub use types::{Axis, BlockPosition, BlockSource, BoundingBox, Direction, InputBlock};
 
 // --- Animation (scenario replay) ---
-pub use animate::{build_animated_glb, Timeline, TimelineEvent, PistonAction};
+pub use animate::{build_animated_glb, PistonAction, Timeline, TimelineEvent};
 
 // --- Mesher ---
-pub use mesher::{Mesher, MesherConfig, MesherOutput, Mesh, Vertex, TintColors, TintProvider};
 pub use mesher::ChunkIter;
+pub use mesher::{Mesh, Mesher, MesherConfig, MesherOutput, TintColors, TintProvider, Vertex};
 
 // --- Canonical output types ---
-pub use mesh_output::{MeshOutput, MeshLayer};
+pub use mesh_output::{MeshLayer, MeshOutput};
 
 // --- Export: standalone functions ---
 pub use export::gltf::export_glb;
+pub use export::gltf_build::{
+    export_build_glb, mesh_from_layers, BuildChild, BuildNode, BuildScene, Interpolation, Track,
+};
 pub use export::obj::{export_obj, ObjExport};
 pub use export::raw::{export_raw, RawMeshData};
-pub use export::usd::{export_usda, export_usdz, UsdaExport, UsdTexture};
+pub use export::usd::{export_usda, export_usdz, UsdTexture, UsdaExport};
 
 // --- Export: trait-based API ---
-pub use export::{MeshExporter, GlbExporter, ObjExporter, UsdzExporter};
+pub use export::{GlbExporter, MeshExporter, ObjExporter, UsdzExporter};
 
 /// Load a resource pack from a file path (ZIP or directory).
 pub fn load_resource_pack<P: AsRef<std::path::Path>>(path: P) -> Result<ResourcePack> {

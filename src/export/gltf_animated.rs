@@ -41,18 +41,22 @@ pub struct AnimatedPiece {
 }
 
 /// Cast a slice of `Copy` values to bytes (little-endian on all our targets).
-fn cast_bytes<T: Copy>(slice: &[T]) -> &[u8] {
+pub(super) fn cast_bytes<T: Copy>(slice: &[T]) -> &[u8] {
     let ptr = slice.as_ptr() as *const u8;
     let len = std::mem::size_of_val(slice);
     unsafe { std::slice::from_raw_parts(ptr, len) }
 }
 
-fn align(buf: &mut Vec<u8>, alignment: usize) {
+pub(super) fn align(buf: &mut Vec<u8>, alignment: usize) {
     let pad = (alignment - (buf.len() % alignment)) % alignment;
     buf.extend(std::iter::repeat(0u8).take(pad));
 }
 
-fn buffer_view(offset: usize, len: usize, target: Option<json::buffer::Target>) -> json::buffer::View {
+pub(super) fn buffer_view(
+    offset: usize,
+    len: usize,
+    target: Option<json::buffer::Target>,
+) -> json::buffer::View {
     json::buffer::View {
         buffer: json::Index::new(0),
         byte_length: USize64(len as u64),
@@ -64,7 +68,7 @@ fn buffer_view(offset: usize, len: usize, target: Option<json::buffer::Target>) 
     }
 }
 
-fn accessor(
+pub(super) fn accessor(
     view: u32,
     count: usize,
     type_: json::accessor::Type,
@@ -114,86 +118,14 @@ pub fn export_animated_glb(atlas: &TextureAtlas, pieces: &[AnimatedPiece]) -> Re
             continue;
         }
 
-        // positions (f32 vec3) + min/max
-        align(&mut buf, 4);
-        let pos_off = buf.len();
-        let mut pmin = [f32::MAX; 3];
-        let mut pmax = [f32::MIN; 3];
-        for v in &mesh.vertices {
-            for i in 0..3 {
-                pmin[i] = pmin[i].min(v.position[i]);
-                pmax[i] = pmax[i].max(v.position[i]);
-            }
-            buf.extend_from_slice(cast_bytes(&v.position));
-        }
-        // normals (f32 vec3)
-        align(&mut buf, 4);
-        let norm_off = buf.len();
-        for v in &mesh.vertices {
-            buf.extend_from_slice(cast_bytes(&v.normal));
-        }
-        // uvs (f32 vec2)
-        align(&mut buf, 4);
-        let uv_off = buf.len();
-        for v in &mesh.vertices {
-            buf.extend_from_slice(cast_bytes(&v.uv));
-        }
-        // colors (f32 vec4)
-        align(&mut buf, 4);
-        let color_off = buf.len();
-        for v in &mesh.vertices {
-            buf.extend_from_slice(cast_bytes(&v.color));
-        }
-        // indices (u32)
-        align(&mut buf, 4);
-        let idx_off = buf.len();
-        buf.extend_from_slice(cast_bytes(&mesh.indices));
-        let end = buf.len();
-
-        let vcount = mesh.vertices.len();
-        let av = accessors.len() as u32;
-        let bv = buffer_views.len() as u32;
-
-        buffer_views.push(buffer_view(pos_off, norm_off - pos_off, Some(json::buffer::Target::ArrayBuffer)));
-        buffer_views.push(buffer_view(norm_off, uv_off - norm_off, Some(json::buffer::Target::ArrayBuffer)));
-        buffer_views.push(buffer_view(uv_off, color_off - uv_off, Some(json::buffer::Target::ArrayBuffer)));
-        buffer_views.push(buffer_view(color_off, idx_off - color_off, Some(json::buffer::Target::ArrayBuffer)));
-        buffer_views.push(buffer_view(idx_off, end - idx_off, Some(json::buffer::Target::ElementArrayBuffer)));
-
-        accessors.push(accessor(
-            bv,
-            vcount,
-            json::accessor::Type::Vec3,
-            json::accessor::ComponentType::F32,
-            Some(json::Value::from(vec![pmin[0], pmin[1], pmin[2]])),
-            Some(json::Value::from(vec![pmax[0], pmax[1], pmax[2]])),
-        ));
-        accessors.push(accessor(bv + 1, vcount, json::accessor::Type::Vec3, json::accessor::ComponentType::F32, None, None));
-        accessors.push(accessor(bv + 2, vcount, json::accessor::Type::Vec2, json::accessor::ComponentType::F32, None, None));
-        accessors.push(accessor(bv + 3, vcount, json::accessor::Type::Vec4, json::accessor::ComponentType::F32, None, None));
-        accessors.push(accessor(bv + 4, mesh.indices.len(), json::accessor::Type::Scalar, json::accessor::ComponentType::U32, None, None));
-
-        let mut attributes = std::collections::BTreeMap::new();
-        attributes.insert(Valid(json::mesh::Semantic::Positions), json::Index::new(av));
-        attributes.insert(Valid(json::mesh::Semantic::Normals), json::Index::new(av + 1));
-        attributes.insert(Valid(json::mesh::Semantic::TexCoords(0)), json::Index::new(av + 2));
-        attributes.insert(Valid(json::mesh::Semantic::Colors(0)), json::Index::new(av + 3));
-
-        let mesh_idx = meshes.len() as u32;
-        meshes.push(json::Mesh {
-            extensions: Default::default(),
-            extras: Default::default(),
-            primitives: vec![json::mesh::Primitive {
-                attributes,
-                extensions: Default::default(),
-                extras: Default::default(),
-                indices: Some(json::Index::new(av + 4)),
-                material: Some(json::Index::new(0)),
-                mode: Valid(json::mesh::Mode::Triangles),
-                targets: None,
-            }],
-            weights: None,
-        });
+        let mesh_idx = push_mesh_geometry(
+            &mut buf,
+            &mut buffer_views,
+            &mut accessors,
+            &mut meshes,
+            mesh,
+            0,
+        );
 
         nodes.push(json::Node {
             camera: None,
@@ -206,7 +138,10 @@ pub fn export_animated_glb(atlas: &TextureAtlas, pieces: &[AnimatedPiece]) -> Re
             // A scale-toggled node starts hidden iff its first key is [0,0,0];
             // bake that as the node's resting scale so frame 0 looks right even
             // before the animation player kicks in.
-            scale: piece.scale_keys.as_ref().map(|k| k.first().map(|(_, s)| *s).unwrap_or([1.0; 3])),
+            scale: piece
+                .scale_keys
+                .as_ref()
+                .map(|k| k.first().map(|(_, s)| *s).unwrap_or([1.0; 3])),
             translation: None,
             skin: None,
             weights: None,
@@ -360,7 +295,7 @@ pub fn export_animated_glb(atlas: &TextureAtlas, pieces: &[AnimatedPiece]) -> Re
     Ok(glb)
 }
 
-fn empty_node() -> json::Node {
+pub(super) fn empty_node() -> json::Node {
     json::Node {
         camera: None,
         children: None,
@@ -378,7 +313,7 @@ fn empty_node() -> json::Node {
 
 /// Append a keyframe channel (times + vec3 values) for one node property.
 #[allow(clippy::too_many_arguments)]
-fn push_vec3_channel(
+pub(super) fn push_vec3_channel(
     buf: &mut Vec<u8>,
     buffer_views: &mut Vec<json::buffer::View>,
     accessors: &mut Vec<json::Accessor>,
@@ -453,4 +388,154 @@ fn push_vec3_channel(
         extensions: Default::default(),
         extras: Default::default(),
     });
+}
+
+/// Write one mesh's vertex streams and indices into the shared buffer and
+/// register its accessors and `json::Mesh`. Returns the mesh index.
+pub(super) fn push_mesh_geometry(
+    buf: &mut Vec<u8>,
+    buffer_views: &mut Vec<json::buffer::View>,
+    accessors: &mut Vec<json::Accessor>,
+    meshes: &mut Vec<json::Mesh>,
+    mesh: &Mesh,
+    material: u32,
+) -> u32 {
+    // positions (f32 vec3) + min/max
+    align(buf, 4);
+    let pos_off = buf.len();
+    let mut pmin = [f32::MAX; 3];
+    let mut pmax = [f32::MIN; 3];
+    for v in &mesh.vertices {
+        for i in 0..3 {
+            pmin[i] = pmin[i].min(v.position[i]);
+            pmax[i] = pmax[i].max(v.position[i]);
+        }
+        buf.extend_from_slice(cast_bytes(&v.position));
+    }
+    // normals (f32 vec3)
+    align(buf, 4);
+    let norm_off = buf.len();
+    for v in &mesh.vertices {
+        buf.extend_from_slice(cast_bytes(&v.normal));
+    }
+    // uvs (f32 vec2)
+    align(buf, 4);
+    let uv_off = buf.len();
+    for v in &mesh.vertices {
+        buf.extend_from_slice(cast_bytes(&v.uv));
+    }
+    // colors (f32 vec4)
+    align(buf, 4);
+    let color_off = buf.len();
+    for v in &mesh.vertices {
+        buf.extend_from_slice(cast_bytes(&v.color));
+    }
+    // indices (u32)
+    align(buf, 4);
+    let idx_off = buf.len();
+    buf.extend_from_slice(cast_bytes(&mesh.indices));
+    let end = buf.len();
+
+    let vcount = mesh.vertices.len();
+    let av = accessors.len() as u32;
+    let bv = buffer_views.len() as u32;
+
+    buffer_views.push(buffer_view(
+        pos_off,
+        norm_off - pos_off,
+        Some(json::buffer::Target::ArrayBuffer),
+    ));
+    buffer_views.push(buffer_view(
+        norm_off,
+        uv_off - norm_off,
+        Some(json::buffer::Target::ArrayBuffer),
+    ));
+    buffer_views.push(buffer_view(
+        uv_off,
+        color_off - uv_off,
+        Some(json::buffer::Target::ArrayBuffer),
+    ));
+    buffer_views.push(buffer_view(
+        color_off,
+        idx_off - color_off,
+        Some(json::buffer::Target::ArrayBuffer),
+    ));
+    buffer_views.push(buffer_view(
+        idx_off,
+        end - idx_off,
+        Some(json::buffer::Target::ElementArrayBuffer),
+    ));
+
+    accessors.push(accessor(
+        bv,
+        vcount,
+        json::accessor::Type::Vec3,
+        json::accessor::ComponentType::F32,
+        Some(json::Value::from(vec![pmin[0], pmin[1], pmin[2]])),
+        Some(json::Value::from(vec![pmax[0], pmax[1], pmax[2]])),
+    ));
+    accessors.push(accessor(
+        bv + 1,
+        vcount,
+        json::accessor::Type::Vec3,
+        json::accessor::ComponentType::F32,
+        None,
+        None,
+    ));
+    accessors.push(accessor(
+        bv + 2,
+        vcount,
+        json::accessor::Type::Vec2,
+        json::accessor::ComponentType::F32,
+        None,
+        None,
+    ));
+    accessors.push(accessor(
+        bv + 3,
+        vcount,
+        json::accessor::Type::Vec4,
+        json::accessor::ComponentType::F32,
+        None,
+        None,
+    ));
+    accessors.push(accessor(
+        bv + 4,
+        mesh.indices.len(),
+        json::accessor::Type::Scalar,
+        json::accessor::ComponentType::U32,
+        None,
+        None,
+    ));
+
+    let mut attributes = std::collections::BTreeMap::new();
+    attributes.insert(Valid(json::mesh::Semantic::Positions), json::Index::new(av));
+    attributes.insert(
+        Valid(json::mesh::Semantic::Normals),
+        json::Index::new(av + 1),
+    );
+    attributes.insert(
+        Valid(json::mesh::Semantic::TexCoords(0)),
+        json::Index::new(av + 2),
+    );
+    attributes.insert(
+        Valid(json::mesh::Semantic::Colors(0)),
+        json::Index::new(av + 3),
+    );
+
+    let mesh_idx = meshes.len() as u32;
+    meshes.push(json::Mesh {
+        extensions: Default::default(),
+        extras: Default::default(),
+        primitives: vec![json::mesh::Primitive {
+            attributes,
+            extensions: Default::default(),
+            extras: Default::default(),
+            indices: Some(json::Index::new(av + 4)),
+            material: Some(json::Index::new(material)),
+            mode: Valid(json::mesh::Mode::Triangles),
+            targets: None,
+        }],
+        weights: None,
+    });
+    mesh_idx
 }

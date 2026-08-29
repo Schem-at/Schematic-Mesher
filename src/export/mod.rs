@@ -30,15 +30,19 @@
 
 pub mod gltf;
 pub mod gltf_animated;
+pub mod gltf_build;
 pub mod obj;
 pub mod raw;
 pub mod usd;
 
 pub use gltf::export_glb;
 pub use gltf_animated::{export_animated_glb, AnimatedPiece};
+pub use gltf_build::{
+    export_build_glb, mesh_from_layers, BuildChild, BuildNode, BuildScene, Interpolation, Track,
+};
 pub use obj::{export_obj, ObjExport};
 pub use raw::{export_raw, RawMeshData};
-pub use usd::{export_usda, export_usdz, UsdaExport, UsdTexture};
+pub use usd::{export_usda, export_usdz, UsdTexture, UsdaExport};
 
 use crate::mesh_output::MeshOutput;
 
