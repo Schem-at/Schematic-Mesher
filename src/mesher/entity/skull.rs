@@ -1,9 +1,17 @@
 use super::{EntityCube, EntityModelDef, EntityPart, EntityPartPose, SkullType};
 use crate::resource_pack::TextureData;
-use crate::types::InputBlock;
+use crate::types::{Direction, InputBlock};
 
 /// Skull/head model.
 pub(super) fn skull_model(skull_type: SkullType) -> EntityModelDef {
+    // Dragon and piglin heads have their own vanilla models (DragonHeadModel,
+    // PiglinHeadModel); everything else is the 8x8x8 SkullModel head.
+    match skull_type {
+        SkullType::Dragon => return dragon_head_model(),
+        SkullType::Piglin => return piglin_head_model(),
+        _ => {}
+    }
+
     let texture_path = match skull_type {
         SkullType::Skeleton => "entity/skeleton/skeleton",
         SkullType::WitherSkeleton => "entity/skeleton/wither_skeleton",
@@ -38,8 +46,8 @@ pub(super) fn skull_model(skull_type: SkullType) -> EntityModelDef {
 
     let mut inner_parts = vec![head];
 
-    // Hat overlay for types that have hat texture region (zombie, piglin, player).
-    let has_hat = matches!(skull_type, SkullType::Zombie | SkullType::Piglin | SkullType::Player);
+    // Hat overlay for types that have hat texture region (zombie, player).
+    let has_hat = matches!(skull_type, SkullType::Zombie | SkullType::Player);
     if has_hat {
         inner_parts.push(EntityPart {
             cubes: vec![EntityCube {
@@ -71,6 +79,169 @@ pub(super) fn skull_model(skull_type: SkullType) -> EntityModelDef {
         texture_size,
         parts: vec![root],
         is_opaque: !has_hat,
+    }
+}
+
+// ── Dragon / piglin heads ───────────────────────────────────────────────────
+//
+// Every number below is read from the unobfuscated 26.2 client jar bytecode
+// (`javap -c -p`).
+//
+// Placement: the shared skull root (T(8,0,8)·RotX(π)) composed with the
+// skull facing matrix equals SkullBlockRenderer's createGroundTransformation /
+// createWallTransformation (T · Ry(-yRot) · S(-1,-1,1)), so the vanilla model
+// parts go under that root unchanged.
+//
+// Pose: SkullBlockRenderer.submitSkull builds a fresh SkullModelBase.State
+// with only `animationPos` set (SkullBlockEntity.getAnimation, 0 for an
+// unpowered head) and Model.setupAnim (resetPose + the per-model setupAnim)
+// runs before drawing. State.yRot/xRot stay 0 (rotation lives in the block
+// transform), so the static pose is the setupAnim result at animationPos = 0.
+
+/// Leaf part holding one cube.
+fn cube_part(cube: EntityCube, pose: EntityPartPose) -> EntityPart {
+    EntityPart { cubes: vec![cube], pose, children: vec![] }
+}
+
+fn plain_cube(origin: [f32; 3], dimensions: [f32; 3], tex_offset: [u32; 2]) -> EntityCube {
+    EntityCube { origin, dimensions, tex_offset, inflate: 0.0, mirror: false, skip_faces: vec![] }
+}
+
+/// The shared skull root: Y-down entity space → Y-up, centred on the block.
+fn skull_root(children: Vec<EntityPart>) -> EntityPart {
+    EntityPart {
+        cubes: vec![],
+        pose: EntityPartPose {
+            position: [8.0, 0.0, 8.0],
+            rotation: [std::f32::consts::PI, 0.0, 0.0],
+            ..Default::default()
+        },
+        children,
+    }
+}
+
+/// A vanilla `.mirror(true)` cube, reproduced exactly.
+///
+/// Vanilla's ModelPart.Cube swaps minX/maxX when mirrored and reverses each
+/// polygon's vertex order, i.e. the cube is the X-reflection of its unmirrored
+/// self: every face shows its UV region flipped horizontally AND the -X face
+/// shows the +X region (and vice versa). `EntityCube::mirror` only does the
+/// flip, so the two side faces are emitted separately with their regions
+/// swapped:
+///   * N/S/U/D: a mirrored cube with the side faces skipped;
+///   * -X face: a mirrored cube whose West region is moved onto the vanilla
+///     +X region (tex u + d + w);
+///   * +X face: the West face of a mirrored cube turned 180° about Y around
+///     the cube centre, which lands it on +X showing the -X region flipped.
+fn vanilla_mirrored_cube(origin: [f32; 3], dimensions: [f32; 3], tex_offset: [u32; 2]) -> Vec<EntityPart> {
+    use Direction::*;
+    let [w, h, d] = dimensions;
+    let only_west = vec![Down, Up, North, South, East];
+    let mirrored = |origin, tex_offset, skip_faces| EntityCube {
+        origin,
+        dimensions,
+        tex_offset,
+        inflate: 0.0,
+        mirror: true,
+        skip_faces,
+    };
+    let centre = [origin[0] + w / 2.0, origin[1] + h / 2.0, origin[2] + d / 2.0];
+    vec![
+        cube_part(mirrored(origin, tex_offset, vec![West, East]), Default::default()),
+        cube_part(
+            mirrored(origin, [tex_offset[0] + (d + w) as u32, tex_offset[1]], only_west.clone()),
+            Default::default(),
+        ),
+        cube_part(
+            mirrored([-w / 2.0, -h / 2.0, -d / 2.0], tex_offset, only_west),
+            EntityPartPose {
+                position: centre,
+                rotation: [0.0, std::f32::consts::PI, 0.0],
+                ..Default::default()
+            },
+        ),
+    ]
+}
+
+/// Ender dragon head — `DragonHeadModel.createHeadLayer()` (256x256 sheet,
+/// `LayerDefinitions` registers it for `DRAGON_SKULL` with no MeshTransformer).
+fn dragon_head_model() -> EntityModelDef {
+    // addBox(name, x, y, z, w, h, d, texU, texV); mirror(true) is sticky on
+    // the CubeListBuilder until mirror(false).
+    let mut head_children = Vec::new();
+    // mirror(true): left scale + left nostril.
+    head_children.extend(vanilla_mirrored_cube([-5.0, -12.0, -4.0], [2.0, 4.0, 6.0], [0, 0]));
+    head_children.extend(vanilla_mirrored_cube([-5.0, -3.0, -22.0], [2.0, 2.0, 4.0], [112, 0]));
+
+    // "jaw": texOffs(176,65) addBox(-6,0,-16, 12,4,16), PartPose.offset(0,4,-8).
+    // setupAnim: jaw.xRot = (sin(animationPos·π·0.2) + 1)·0.2 = 0.2 at rest.
+    head_children.push(cube_part(
+        plain_cube([-6.0, 0.0, -16.0], [12.0, 4.0, 16.0], [176, 65]),
+        EntityPartPose { position: [0.0, 4.0, -8.0], rotation: [0.2, 0.0, 0.0], ..Default::default() },
+    ));
+
+    let head = EntityPart {
+        cubes: vec![
+            // upper_lip
+            plain_cube([-6.0, -1.0, -24.0], [12.0, 5.0, 16.0], [176, 44]),
+            // upper_head
+            plain_cube([-8.0, -8.0, -10.0], [16.0, 16.0, 16.0], [112, 30]),
+            // mirror(false): right scale + right nostril.
+            plain_cube([3.0, -12.0, -4.0], [2.0, 4.0, 6.0], [0, 0]),
+            plain_cube([3.0, -3.0, -22.0], [2.0, 2.0, 4.0], [112, 0]),
+        ],
+        // PartPose.offset(0, -7.986666, 0).scaled(0.75): PartPose.scaled(f)
+        // multiplies the offset AND sets the scale; ModelPart.translateAndRotate
+        // applies translate → rotateZYX → scale (same as traverse_parts).
+        // head.xRot/yRot are set from State (0) by setupAnim.
+        pose: EntityPartPose {
+            position: [0.0, -7.986666 * 0.75, 0.0],
+            rotation: [0.0, 0.0, 0.0],
+            scale: [0.75, 0.75, 0.75],
+        },
+        children: head_children,
+    };
+
+    EntityModelDef {
+        texture_path: "entity/enderdragon/dragon".to_string(),
+        texture_size: [256, 256],
+        parts: vec![skull_root(vec![head])],
+        is_opaque: true,
+    }
+}
+
+/// Piglin head — `PiglinHeadModel.createHeadModel()` = `AbstractPiglinModel.addHead(
+/// CubeDeformation.NONE, mesh)`, registered as a 64x64 layer in
+/// `LayerDefinitions`. There is no hat layer.
+fn piglin_head_model() -> EntityModelDef {
+    // setupAnim at animationPos = 0 overrides the addHead ear zRot (∓π/6):
+    //   leftEar.zRot  = -(cos(0·π·0.2·1.2) + 2.5)·0.2 = -0.7
+    //   rightEar.zRot =  (cos(0·π·0.2)     + 2.5)·0.2 =  0.7
+    let left_ear = cube_part(
+        plain_cube([0.0, 0.0, -2.0], [1.0, 5.0, 4.0], [51, 6]),
+        EntityPartPose { position: [4.5, -6.0, 0.0], rotation: [0.0, 0.0, -0.7], ..Default::default() },
+    );
+    let right_ear = cube_part(
+        plain_cube([-1.0, 0.0, -2.0], [1.0, 5.0, 4.0], [39, 6]),
+        EntityPartPose { position: [-4.5, -6.0, 0.0], rotation: [0.0, 0.0, 0.7], ..Default::default() },
+    );
+
+    let head = EntityPart {
+        cubes: vec![
+            plain_cube([-5.0, -8.0, -4.0], [10.0, 8.0, 8.0], [0, 0]),  // head
+            plain_cube([-2.0, -4.0, -5.0], [4.0, 4.0, 1.0], [31, 1]),  // snout
+            plain_cube([2.0, -2.0, -5.0], [1.0, 2.0, 1.0], [2, 4]),    // tusk
+            plain_cube([-3.0, -2.0, -5.0], [1.0, 2.0, 1.0], [2, 0]),   // tusk
+        ],
+        pose: Default::default(), // PartPose.ZERO
+        children: vec![left_ear, right_ear],
+    };
+
+    EntityModelDef {
+        texture_path: "entity/piglin/piglin".to_string(),
+        texture_size: [64, 64],
+        parts: vec![skull_root(vec![head])],
+        is_opaque: true,
     }
 }
 
@@ -279,5 +450,240 @@ mod tests {
         assert_eq!(total_cubes, 2); // head + hat
         // Each cube = 6 faces, so 12 faces total
         assert_eq!(total_cubes * 6, 12);
+    }
+}
+
+#[cfg(test)]
+mod dragon_piglin_tests {
+    use super::super::{generate_entity_geometry, traverse_parts, BlockEntityType, EntityPart, SkullType};
+    use super::*;
+    use crate::mesher::geometry::Vertex;
+    use glam::Mat4;
+
+    fn count_cubes(parts: &[EntityPart]) -> usize {
+        parts.iter().map(|p| p.cubes.len() + count_cubes(&p.children)).sum()
+    }
+
+    fn mesh(block: &InputBlock, ty: SkullType) -> Vec<Vertex> {
+        generate_entity_geometry(block, &BlockEntityType::Skull(ty)).0
+    }
+
+    fn bounds(verts: &[Vertex]) -> ([f32; 3], [f32; 3]) {
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        for v in verts {
+            for i in 0..3 {
+                lo[i] = lo[i].min(v.position[i]);
+                hi[i] = hi[i].max(v.position[i]);
+            }
+        }
+        (lo, hi)
+    }
+
+    /// Normal of the unique quad whose UV rectangle starts at `uv_min` (pixels).
+    fn face_normal(verts: &[Vertex], uv_min: [f32; 2], tex: [f32; 2]) -> [f32; 3] {
+        let hits: Vec<[f32; 3]> = verts
+            .chunks(4)
+            .filter(|q| {
+                let u = q.iter().map(|v| v.uv[0]).fold(f32::MAX, f32::min);
+                let v = q.iter().map(|v| v.uv[1]).fold(f32::MAX, f32::min);
+                (u * tex[0] - uv_min[0]).abs() < 1e-3 && (v * tex[1] - uv_min[1]).abs() < 1e-3
+            })
+            .map(|q| q[0].normal)
+            .collect();
+        assert_eq!(hits.len(), 1, "expected one quad at uv {:?}", uv_min);
+        hits[0]
+    }
+
+    fn assert_vec_eq(a: [f32; 3], b: [f32; 3], what: &str) {
+        for i in 0..3 {
+            assert!((a[i] - b[i]).abs() < 1e-4, "{what}: {a:?} != {b:?}");
+        }
+    }
+
+    /// Every placement the tests exercise: standing rotations 0..15 and wall facings.
+    fn placements(kind: &str) -> Vec<InputBlock> {
+        let mut out: Vec<InputBlock> = (0..16)
+            .map(|r| InputBlock::new(&format!("minecraft:{kind}_head")).with_property("rotation", &r.to_string()))
+            .collect();
+        for f in ["north", "south", "east", "west"] {
+            out.push(InputBlock::new(&format!("minecraft:{kind}_wall_head")).with_property("facing", f));
+        }
+        out
+    }
+
+    fn zombie_for(block: &InputBlock) -> InputBlock {
+        let id = block.block_id().replace("dragon", "zombie").replace("piglin", "zombie");
+        let mut z = InputBlock::new(&id);
+        for (k, v) in &block.properties {
+            z = z.with_property(k, v);
+        }
+        z
+    }
+
+    #[test]
+    fn dragon_head_geometry_counts() {
+        let model = skull_model(SkullType::Dragon);
+        assert_eq!(model.texture_size, [256, 256]);
+        assert_eq!(model.texture_path, "entity/enderdragon/dragon");
+        // upper_lip, upper_head, 2 right scale/nostril, jaw + 2 mirrored cubes × 3 pieces.
+        assert_eq!(count_cubes(&model.parts), 5 + 2 * 3);
+        // 5 full cubes (30 faces) + 2 mirrored cubes (6 faces each).
+        let verts = mesh(&InputBlock::new("minecraft:dragon_head"), SkullType::Dragon);
+        assert_eq!(verts.len(), (30 + 12) * 4);
+    }
+
+    #[test]
+    fn piglin_head_geometry_counts() {
+        let model = skull_model(SkullType::Piglin);
+        assert_eq!(model.texture_size, [64, 64]);
+        assert!(model.is_opaque, "vanilla piglin head has no hat layer");
+        // head, snout, 2 tusks, 2 ears
+        assert_eq!(count_cubes(&model.parts), 6);
+        let verts = mesh(&InputBlock::new("minecraft:piglin_head"), SkullType::Piglin);
+        assert_eq!(verts.len(), 36 * 4);
+    }
+
+    #[test]
+    fn dragon_head_bounds_rotation_0() {
+        let (lo, hi) = bounds(&mesh(
+            &InputBlock::new("minecraft:dragon_head").with_property("rotation", "0"),
+            SkullType::Dragon,
+        ));
+        let head_y = -7.986666_f32 * 0.75;
+        // x: upper_head ±8 px scaled 0.75.
+        assert!((lo[0] - (0.5 - 6.0 / 16.0)).abs() < 1e-4, "{lo:?}");
+        assert!((hi[0] - (0.5 + 6.0 / 16.0)).abs() < 1e-4, "{hi:?}");
+        // top: scales at y = -12 (Y-down) in head space.
+        assert!((hi[1] - (-(-12.0 * 0.75 + head_y)) / 16.0).abs() < 1e-4, "{hi:?}");
+        // bottom: jaw's front-bottom edge, (y=4, z=-16) in jaw space, rotated by
+        // xRot 0.2 (y' = y·cos − z·sin) about the jaw pivot at head-space y=4.
+        // Vanilla's open jaw dips ~2.3 px below the block it stands on.
+        let (s, c) = 0.2_f32.sin_cos();
+        let jaw_y = 4.0 + (4.0 * c - (-16.0) * s);
+        assert!((lo[1] - (-(jaw_y * 0.75 + head_y)) / 16.0).abs() < 1e-4, "{lo:?}");
+        // rotation 0 faces north (-Z): snout (upper_lip front, z=-24) out of the block,
+        // back of upper_head (z=+6) behind the centre.
+        assert!((lo[2] - (0.5 - 24.0 * 0.75 / 16.0)).abs() < 1e-4, "{lo:?}");
+        assert!((hi[2] - (0.5 + 6.0 * 0.75 / 16.0)).abs() < 1e-4, "{hi:?}");
+    }
+
+    #[test]
+    fn piglin_head_bounds_rotation_0() {
+        let (lo, hi) = bounds(&mesh(
+            &InputBlock::new("minecraft:piglin_head").with_property("rotation", "0"),
+            SkullType::Piglin,
+        ));
+        // Ears: pivot x=±4.5, far corner (1,5) rotated by zRot ∓0.7.
+        let (s, c) = 0.7_f32.sin_cos();
+        let ear_x = 4.5 + c + 5.0 * s;
+        assert!((lo[0] - (0.5 - ear_x / 16.0)).abs() < 1e-4, "{lo:?}");
+        assert!((hi[0] - (0.5 + ear_x / 16.0)).abs() < 1e-4, "{hi:?}");
+        assert!(lo[1].abs() < 1e-4 && (hi[1] - 0.5).abs() < 1e-4, "{lo:?} {hi:?}");
+        // snout front at z=-5 → north for rotation 0
+        assert!((lo[2] - (0.5 - 5.0 / 16.0)).abs() < 1e-4, "{lo:?}");
+        assert!((hi[2] - (0.5 + 4.0 / 16.0)).abs() < 1e-4, "{hi:?}");
+    }
+
+    /// The dragon's snout and the piglin's snout face the same way as the
+    /// zombie's face for every rotation and wall facing.
+    #[test]
+    fn faces_match_zombie_orientation() {
+        for (kind, ty, uv, tex) in [
+            // upper_lip north region: (176+16, 44+16)
+            ("dragon", SkullType::Dragon, [192.0, 60.0], [256.0, 256.0]),
+            // snout north region: (31+1, 1+1)
+            ("piglin", SkullType::Piglin, [32.0, 2.0], [64.0, 64.0]),
+        ] {
+            for block in placements(kind) {
+                let zombie = mesh(&zombie_for(&block), SkullType::Zombie);
+                // zombie head front: north region of texOffs(0,0) 8x8x8 → (8, 8)
+                let want = face_normal(&zombie, [8.0, 8.0], [64.0, 64.0]);
+                let got = face_normal(&mesh(&block, ty), uv, tex);
+                assert_vec_eq(got, want, &format!("{} {:?}", block.block_id(), block.properties));
+            }
+        }
+    }
+
+    /// Wall heads sit on the same block-space anchor as the zombie wall head:
+    /// the back of the head (model +Z side of the 8-px-deep reference box) is
+    /// flush with the wall for the piglin, exactly like the zombie.
+    #[test]
+    fn piglin_wall_head_flush_like_zombie() {
+        for f in ["north", "south", "east", "west"] {
+            let b = InputBlock::new("minecraft:piglin_wall_head").with_property("facing", f);
+            let (plo, phi) = bounds(&mesh(&b, SkullType::Piglin));
+            let (zlo, zhi) = bounds(&mesh(&zombie_for(&b), SkullType::Zombie));
+            let (axis, back_is_max) = match f {
+                "north" => (2, true),
+                "south" => (2, false),
+                "east" => (0, false),
+                _ => (0, true),
+            };
+            // zombie includes a 0.25 inflated hat; compare to its inner head plane.
+            let hat = 0.25 / 16.0;
+            if back_is_max {
+                assert!((phi[axis] - (zhi[axis] - hat)).abs() < 1e-4, "{f}");
+            } else {
+                assert!((plo[axis] - (zlo[axis] + hat)).abs() < 1e-4, "{f}");
+            }
+            assert!((plo[1] - (zlo[1] + hat)).abs() < 1e-4, "{f} y");
+        }
+    }
+
+    type Quad = Vec<([i32; 3], [i32; 2])>;
+
+    fn quads(parts: &[EntityPart], tex: [u32; 2], reflect_x_about: Option<f32>) -> Vec<(Quad, [i32; 3])> {
+        let model = EntityModelDef {
+            texture_path: String::new(),
+            texture_size: tex,
+            parts: parts.to_vec(),
+            is_opaque: true,
+        };
+        let (mut v, mut i, mut f) = (Vec::new(), Vec::new(), Vec::new());
+        traverse_parts(&model.parts, Mat4::IDENTITY, &Mat4::IDENTITY, &model, &mut v, &mut i, &mut f);
+        let r = |x: f32| (x * 4096.0).round() as i32;
+        let mut out: Vec<(Quad, [i32; 3])> = v
+            .chunks(4)
+            .map(|q| {
+                let mut quad: Quad = q
+                    .iter()
+                    .map(|vx| {
+                        let mut p = vx.position;
+                        if let Some(c) = reflect_x_about {
+                            p[0] = 2.0 * c - p[0];
+                        }
+                        ([r(p[0]), r(p[1]), r(p[2])], [r(vx.uv[0]), r(vx.uv[1])])
+                    })
+                    .collect();
+                quad.sort();
+                let mut n = q[0].normal;
+                if reflect_x_about.is_some() {
+                    n[0] = -n[0];
+                }
+                (quad, [r(n[0]), r(n[1]), r(n[2])])
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// `vanilla_mirrored_cube` must be exactly the X-reflection (about the cube
+    /// centre) of the unmirrored cube, textures included — that is what
+    /// vanilla's ModelPart.Cube does when `mirror` is set (swap minX/maxX and
+    /// reverse polygon vertex order).
+    #[test]
+    fn vanilla_mirrored_cube_is_reflection_of_plain_cube() {
+        for (origin, dims, tex) in [
+            ([-5.0, -12.0, -4.0], [2.0, 4.0, 6.0], [0u32, 0u32]),
+            ([-5.0, -3.0, -22.0], [2.0, 2.0, 4.0], [112, 0]),
+        ] {
+            let centre_x = (origin[0] + dims[0] / 2.0) / 16.0;
+            let plain = vec![cube_part(plain_cube(origin, dims, tex), Default::default())];
+            let want = quads(&plain, [256, 256], Some(centre_x));
+            let got = quads(&vanilla_mirrored_cube(origin, dims, tex), [256, 256], None);
+            assert_eq!(got.len(), 6);
+            assert_eq!(got, want, "mirrored cube at {origin:?}");
+        }
     }
 }
