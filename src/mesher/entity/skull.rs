@@ -360,20 +360,63 @@ fn decode_base64(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Determine player skin fallback path based on UUID.
-/// Even first hex digit → Steve, odd → Alex.
-pub(crate) fn player_skin_fallback_path(block: &InputBlock) -> &'static str {
-    if let Some(uuid) = block.properties.get("uuid") {
-        let first_char = uuid.chars().find(|c| c.is_ascii_hexdigit());
-        if let Some(ch) = first_char {
-            let digit = ch.to_digit(16).unwrap_or(0);
-            if digit % 2 == 1 {
-                return "entity/player/slim/alex";
-            }
-        }
+/// Vanilla's default skins in `DefaultPlayerSkin.DEFAULT_SKINS` order
+/// (26.2 client): nine slim, then the same nine wide. `true` = slim.
+const DEFAULT_SKINS: [(&str, bool); 18] = [
+    ("entity/player/slim/alex", true),
+    ("entity/player/slim/ari", true),
+    ("entity/player/slim/efe", true),
+    ("entity/player/slim/kai", true),
+    ("entity/player/slim/makena", true),
+    ("entity/player/slim/noor", true),
+    ("entity/player/slim/steve", true),
+    ("entity/player/slim/sunny", true),
+    ("entity/player/slim/zuri", true),
+    ("entity/player/wide/alex", false),
+    ("entity/player/wide/ari", false),
+    ("entity/player/wide/efe", false),
+    ("entity/player/wide/kai", false),
+    ("entity/player/wide/makena", false),
+    ("entity/player/wide/noor", false),
+    ("entity/player/wide/steve", false),
+    ("entity/player/wide/sunny", false),
+    ("entity/player/wide/zuri", false),
+];
+
+/// Parse a UUID (hyphenated or 32 hex digits) into Java's (most, least) halves.
+pub(crate) fn parse_uuid(s: &str) -> Option<(u64, u64)> {
+    let hex: String = s.chars().filter(|c| *c != '-').collect();
+    if hex.len() != 32 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
     }
-    "entity/player/wide/steve"
+    let most = u64::from_str_radix(&hex[..16], 16).ok()?;
+    let least = u64::from_str_radix(&hex[16..], 16).ok()?;
+    Some((most, least))
 }
+
+/// Vanilla `DefaultPlayerSkin.get(UUID)`: `DEFAULT_SKINS[floorMod(uuid.hashCode(), 18)]`,
+/// where `UUID.hashCode()` folds `most ^ least` to 32 bits. Returns `(texture path, slim)`.
+pub(crate) fn default_player_skin(uuid: &str) -> Option<(&'static str, bool)> {
+    let (most, least) = parse_uuid(uuid)?;
+    let hilo = most ^ least;
+    let hash = ((hilo >> 32) as i32) ^ (hilo as i32);
+    Some(DEFAULT_SKINS[hash.rem_euclid(DEFAULT_SKINS.len() as i32) as usize])
+}
+
+/// The resource-pack skin to use when a player has no explicit skin: vanilla's
+/// default for its `uuid`, or wide Steve without one.
+pub(crate) fn player_skin_fallback_path(block: &InputBlock) -> &'static str {
+    block
+        .properties
+        .get("uuid")
+        .and_then(|u| default_player_skin(u))
+        .map(|(path, _)| path)
+        .unwrap_or("entity/player/wide/steve")
+}
+
+/// Texture paths to try, in order, for a player skin that is missing from the
+/// pack: packs before 1.19.3 only ship `entity/steve` and `entity/alex`.
+pub(crate) const PLAYER_SKIN_LAST_RESORTS: [&str; 2] = ["entity/player/wide/steve", "entity/steve"];
 
 #[cfg(test)]
 mod tests {
@@ -420,18 +463,35 @@ mod tests {
         let block = InputBlock::new("minecraft:player_head");
         assert_eq!(player_skin_fallback_path(&block), "entity/player/wide/steve");
 
-        // Even first digit → Steve
+        // Not a UUID → Steve
         let block = InputBlock::new("minecraft:player_head")
             .with_property("uuid", "2a3b4c5d");
         assert_eq!(player_skin_fallback_path(&block), "entity/player/wide/steve");
     }
 
+    /// Expected values from Java: `Math.floorMod(UUID.fromString(s).hashCode(), 18)`.
     #[test]
-    fn test_player_skin_fallback_alex_by_uuid() {
-        // Odd first digit → Alex
-        let block = InputBlock::new("minecraft:player_head")
-            .with_property("uuid", "1a2b3c4d");
-        assert_eq!(player_skin_fallback_path(&block), "entity/player/slim/alex");
+    fn test_default_skin_matches_java_uuid_hash() {
+        // Values checked with jshell on JDK 25.
+        assert_eq!(
+            default_player_skin("069a79f4-44e9-4726-a5be-fca90e38aaf5"),
+            Some(("entity/player/slim/alex", true))
+        );
+        assert_eq!(
+            default_player_skin("853c80ef-3c37-49fd-aa49-938b674adae6"),
+            Some(("entity/player/slim/ari", true))
+        );
+        // All-zero UUID hashes to 0 → slim Alex.
+        assert_eq!(
+            default_player_skin("00000000000000000000000000000000"),
+            Some(("entity/player/slim/alex", true))
+        );
+        // most=0, least=0x0000000f_00000000 → hashCode 15 → wide Steve.
+        assert_eq!(
+            default_player_skin("00000000-0000-0000-0000-000f00000000"),
+            Some(("entity/player/wide/steve", false))
+        );
+        assert_eq!(default_player_skin("not-a-uuid"), None);
     }
 
     #[test]

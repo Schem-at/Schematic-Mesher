@@ -672,28 +672,10 @@ impl<'a> MeshBuilder<'a> {
 
         // Players: dynamic skin texture + direct model generation
         if matches!(mob_type, entity::MobType::Player) {
-            let tex_key = format!("_player/{}_{}_{}", pos.x, pos.y, pos.z);
+            let tex_key = Self::player_skin_key(block);
             if !self.dynamic_textures.contains_key(&tex_key) {
-                // Try base64 skin property first (primary path for WASM/JS callers).
-                if let Some(skin_b64) = block.properties.get("skin_base64") {
-                    if let Some(skin_tex) = entity::skull::decode_base64_skin(skin_b64) {
-                        self.dynamic_textures.insert(tex_key.clone(), skin_tex);
-                    }
-                }
-                // Then try hex skin property (legacy/inline-in-Rust path).
-                if !self.dynamic_textures.contains_key(&tex_key) {
-                    if let Some(skin_hex) = block.properties.get("skin") {
-                        if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
-                            self.dynamic_textures.insert(tex_key.clone(), skin_tex);
-                        }
-                    }
-                }
-                // Finally fall back to Steve/Alex from the resource pack.
-                if !self.dynamic_textures.contains_key(&tex_key) {
-                    let fallback = entity::skull::player_skin_fallback_path(block);
-                    if let Some(tex) = self.resource_pack.get_texture(fallback) {
-                        self.dynamic_textures.insert(tex_key.clone(), tex.clone());
-                    }
+                if let Some(skin) = self.resolve_player_skin(block) {
+                    self.dynamic_textures.insert(tex_key.clone(), skin);
                 }
             }
 
@@ -837,25 +819,10 @@ impl<'a> MeshBuilder<'a> {
 
         // Player riders use the dynamic-skin path; other mobs use the standard one.
         if matches!(rider_type, entity::MobType::Player) {
-            let tex_key = format!("_player/{}_{}_{}_rider", host_pos.x, host_pos.y, host_pos.z);
+            let tex_key = Self::player_skin_key(&rider_block);
             if !self.dynamic_textures.contains_key(&tex_key) {
-                if let Some(skin_b64) = rider_block.properties.get("skin_base64") {
-                    if let Some(skin_tex) = entity::skull::decode_base64_skin(skin_b64) {
-                        self.dynamic_textures.insert(tex_key.clone(), skin_tex);
-                    }
-                }
-                if !self.dynamic_textures.contains_key(&tex_key) {
-                    if let Some(skin_hex) = rider_block.properties.get("skin") {
-                        if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
-                            self.dynamic_textures.insert(tex_key.clone(), skin_tex);
-                        }
-                    }
-                }
-                if !self.dynamic_textures.contains_key(&tex_key) {
-                    let fallback = entity::skull::player_skin_fallback_path(&rider_block);
-                    if let Some(tex) = self.resource_pack.get_texture(fallback) {
-                        self.dynamic_textures.insert(tex_key.clone(), tex.clone());
-                    }
+                if let Some(skin) = self.resolve_player_skin(&rider_block) {
+                    self.dynamic_textures.insert(tex_key.clone(), skin);
                 }
             }
 
@@ -1274,53 +1241,66 @@ impl<'a> MeshBuilder<'a> {
         Ok(())
     }
 
+    /// Dynamic-texture key for a player's skin: shared by every head, player
+    /// and rider wearing the same skin.
+    fn player_skin_key(block: &InputBlock) -> String {
+        use std::hash::{Hash, Hasher};
+        for key in ["skin_base64", "skin"] {
+            if let Some(data) = block.properties.get(key) {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                data.hash(&mut h);
+                return format!("_skin/inline/{:016x}", h.finish());
+            }
+        }
+        if let Some(path) = block.properties.get("skin_texture") {
+            return format!("_skin/pack/{path}");
+        }
+        format!("_skin/pack/{}", entity::skull::player_skin_fallback_path(block))
+    }
+
+    /// Resolve a player's skin texture, in order:
+    /// 1. `skin_base64`: base64 PNG bytes (the WASM/JS-friendly path);
+    /// 2. `skin`: hex PNG bytes;
+    /// 3. `skin_texture`: a texture already in the resource pack, e.g. one a
+    ///    caller registered for a downloaded skin, or a profile's `texture` override;
+    /// 4. vanilla's default skin for `uuid` (wide Steve without one), then Steve
+    ///    under its pre-1.19.3 path for old packs.
+    fn resolve_player_skin(&self, block: &InputBlock) -> Option<TextureData> {
+        if let Some(t) = block.properties.get("skin_base64").and_then(|s| entity::skull::decode_base64_skin(s)) {
+            return Some(t);
+        }
+        if let Some(t) = block.properties.get("skin").and_then(|s| entity::skull::decode_hex_skin(s)) {
+            return Some(t);
+        }
+        let explicit = block.properties.get("skin_texture").map(String::as_str);
+        let default = entity::skull::player_skin_fallback_path(block);
+        explicit
+            .into_iter()
+            .chain(std::iter::once(default))
+            .chain(entity::skull::PLAYER_SKIN_LAST_RESORTS)
+            .find_map(|path| self.resource_pack.get_texture(path))
+            .cloned()
+    }
+
     /// Add player head entity with skin texture support.
     fn add_player_head(
         &mut self,
         pos: BlockPosition,
         block: &InputBlock,
     ) -> Result<()> {
-        let block_id = block.block_id();
-        let is_wall = block_id.contains("wall");
-
-        // Determine texture key
-        let tex_key = format!("_player_head/{}_{}_{}", pos.x, pos.y, pos.z);
-
-        // Prefer base64 skin (the WASM/JS-friendly path), then hex, then fallback.
+        // One atlas entry per distinct skin, not per head.
+        let tex_key = Self::player_skin_key(block);
         if !self.dynamic_textures.contains_key(&tex_key) {
-            if let Some(skin_b64) = block.properties.get("skin_base64") {
-                if let Some(skin_tex) = entity::skull::decode_base64_skin(skin_b64) {
-                    self.dynamic_textures.insert(tex_key.clone(), skin_tex);
-                }
-            }
-            if !self.dynamic_textures.contains_key(&tex_key) {
-                if let Some(skin_hex) = block.properties.get("skin") {
-                    if let Some(skin_tex) = entity::skull::decode_hex_skin(skin_hex) {
-                        self.dynamic_textures.insert(tex_key.clone(), skin_tex);
-                    }
-                }
-            }
-            // If no skin decoded, load fallback from resource pack
-            if !self.dynamic_textures.contains_key(&tex_key) {
-                let fallback_path = entity::skull::player_skin_fallback_path(block);
-                if let Some(fallback_tex) = self.resource_pack.get_texture(fallback_path) {
-                    self.dynamic_textures.insert(tex_key.clone(), fallback_tex.clone());
-                }
+            if let Some(skin) = self.resolve_player_skin(block) {
+                self.dynamic_textures.insert(tex_key.clone(), skin);
             }
         }
 
-        // Build player skull model with the texture key
         let model = entity::skull::player_skull_model(&tex_key);
 
-        // Compute facing/rotation (same logic as regular skulls)
-        let facing_angle = if is_wall {
-            entity::facing_rotation_rad(entity::get_facing(block))
-        } else {
-            entity::standing_rotation_rad(block)
-        };
-        let facing_mat = glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.0, 0.5))
-            * glam::Mat4::from_rotation_y(facing_angle)
-            * glam::Mat4::from_translation(glam::Vec3::new(-0.5, 0.0, -0.5));
+        // Same placement as every other skull: vanilla SkullBlockRenderer's
+        // rotation, plus the wall offset that holds a wall head against its wall.
+        let facing_mat = entity::skull_placement(block);
 
         let mut vertices = Vec::new();
         let mut indices = Vec::new();

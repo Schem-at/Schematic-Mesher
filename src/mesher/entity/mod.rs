@@ -482,6 +482,45 @@ fn cube_face_uvs(
 
 // ── Geometry Generation ─────────────────────────────────────────────────────
 
+/// Block-space placement of any skull or head (mob or player), matching
+/// vanilla `SkullBlockRenderer`.
+///
+/// Standing: rotate about the block's bottom centre. Vanilla's world face
+/// direction is (sin(yRot), 0, -cos(yRot)); our models face +Z locally, so the
+/// angle is α = π − yRot. Wall: yRot is the opposite of `facing`, and the head
+/// sits at (0.5 − stepX·0.25, 0.25, 0.5 − stepZ·0.25), against the wall on the
+/// −facing side.
+pub(crate) fn skull_placement(block: &InputBlock) -> Mat4 {
+    let facing = get_facing(block);
+    let is_wall = block.block_id().contains("wall");
+    let yrot_mc = if is_wall {
+        match facing {
+            "south" => std::f32::consts::PI,
+            "north" => 0.0,
+            "east" => std::f32::consts::FRAC_PI_2,
+            "west" => -std::f32::consts::FRAC_PI_2,
+            _ => 0.0,
+        }
+    } else {
+        standing_rotation_rad(block)
+    };
+    let base = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+        * Mat4::from_rotation_y(std::f32::consts::PI - yrot_mc)
+        * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5));
+    if is_wall {
+        let (dx, dz) = match facing {
+            "south" => (0.0, -0.25),
+            "north" => (0.0, 0.25),
+            "east" => (-0.25, 0.0),
+            "west" => (0.25, 0.0),
+            _ => (0.0, 0.0),
+        };
+        Mat4::from_translation(Vec3::new(dx, 0.25, dz)) * base
+    } else {
+        base
+    }
+}
+
 /// Generate all entity geometry for a block entity.
 ///
 /// Returns (vertices, indices, face_textures) ready for MeshBuilder integration.
@@ -536,50 +575,19 @@ pub fn generate_entity_geometry(
             _ => Mat4::IDENTITY,
         };
         Mat4::from_translation(center) * rot_mat * Mat4::from_translation(-center)
+    } else if matches!(entity_type, BlockEntityType::Skull(_)) {
+        skull_placement(block)
     } else {
         // Standard Y-rotation around (0.5, 0, 0.5)
         let facing_angle = match entity_type {
             BlockEntityType::Banner { is_wall: false, .. } => standing_rotation_rad(block),
             BlockEntityType::Sign { is_wall: false, .. } => standing_rotation_rad(block),
             BlockEntityType::HangingSign { is_wall: false, .. } => standing_rotation_rad(block),
-            BlockEntityType::Skull(_) => {
-                // Match MC SkullBlockRenderer: world face direction is
-                // (sin(yRot_mc), 0, -cos(yRot_mc)). Our model's face is on +Z local,
-                // so we need α = π - yRot_mc to produce the same world direction.
-                let yrot_mc = if block.block_id().contains("wall") {
-                    // Wall skulls rotate by the opposite of `facing`.
-                    match facing {
-                        "south" => std::f32::consts::PI,
-                        "north" => 0.0,
-                        "east" => std::f32::consts::FRAC_PI_2,
-                        "west" => -std::f32::consts::FRAC_PI_2,
-                        _ => 0.0,
-                    }
-                } else {
-                    standing_rotation_rad(block)
-                };
-                std::f32::consts::PI - yrot_mc
-            }
             _ => facing_rotation_rad(facing),
         };
-        let base = Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
+        Mat4::from_translation(Vec3::new(0.5, 0.0, 0.5))
             * Mat4::from_rotation_y(facing_angle)
-            * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5));
-
-        // Wall skulls: MC renders at (0.5 - stepX*0.25, 0.25, 0.5 - stepZ*0.25).
-        // The wall is on the -facing side; skull face points in +facing direction.
-        if matches!(entity_type, BlockEntityType::Skull(_)) && block.block_id().contains("wall") {
-            let (dx, dz) = match facing {
-                "south" => (0.0, -0.25),
-                "north" => (0.0, 0.25),
-                "east" => (-0.25, 0.0),
-                "west" => (0.25, 0.0),
-                _ => (0.0, 0.0),
-            };
-            Mat4::from_translation(Vec3::new(dx, 0.25, dz)) * base
-        } else {
-            base
-        }
+            * Mat4::from_translation(Vec3::new(-0.5, 0.0, -0.5))
     };
 
     traverse_parts(

@@ -3,23 +3,25 @@ use super::armor_stand::parse_pose;
 use super::mob::mob_root;
 use crate::types::InputBlock;
 
-/// Determine whether the player should use slim (Alex) arms.
+/// Determine whether the player should use slim (Alex) arms: an explicit
+/// `slim` property wins; otherwise a player wearing vanilla's default skin for
+/// its `uuid` gets that skin's arm model.
 fn is_slim(block: &InputBlock) -> bool {
-    // Explicit slim property
-    if block.properties.get("slim").map(|v| v == "true").unwrap_or(false) {
-        return true;
+    if let Some(v) = block.properties.get("slim") {
+        return v == "true";
     }
-    // UUID parity: odd first hex digit → Alex (slim)
-    if let Some(uuid) = block.properties.get("uuid") {
-        let first_char = uuid.chars().find(|c| c.is_ascii_hexdigit());
-        if let Some(ch) = first_char {
-            let digit = ch.to_digit(16).unwrap_or(0);
-            if digit % 2 == 1 {
-                return true;
-            }
-        }
+    let has_custom_skin = ["skin_base64", "skin", "skin_texture"]
+        .iter()
+        .any(|k| block.properties.contains_key(*k));
+    if has_custom_skin {
+        return false;
     }
-    false
+    block
+        .properties
+        .get("uuid")
+        .and_then(|u| super::skull::default_player_skin(u))
+        .map(|(_, slim)| slim)
+        .unwrap_or(false)
 }
 
 /// Full player model — 64x64 texture.
