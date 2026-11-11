@@ -208,6 +208,16 @@ fn missing_skin_texture_falls_back_to_the_default_skin() {
     scene.set(0, 0, 0, "minecraft:player_head", &[("skin_texture", "nucleation:skins/missing")]);
     let out = mesh(&scene);
     assert!(out.atlas.pixels.chunks(4).any(|p| p == [0, 0, 255, 255]), "Steve");
+    // Keyed by the texture actually used, so a shared atlas can look it up.
+    assert_eq!(skin_regions(&out), vec!["_skin/pack/entity/player/wide/steve"]);
+
+    // With a UUID, the fallback is that UUID's default skin.
+    let mut scene = Scene::new();
+    scene.set(0, 0, 0, "minecraft:player_head", &[
+        ("skin_texture", "nucleation:skins/missing"),
+        ("uuid", "069a79f4-44e9-4726-a5be-fca90e38aaf5"),
+    ]);
+    assert_eq!(skin_regions(&mesh(&scene)), vec!["_skin/pack/entity/player/slim/alex"]);
 }
 
 #[test]

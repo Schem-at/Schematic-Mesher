@@ -672,7 +672,7 @@ impl<'a> MeshBuilder<'a> {
 
         // Players: dynamic skin texture + direct model generation
         if matches!(mob_type, entity::MobType::Player) {
-            let tex_key = Self::player_skin_key(block);
+            let tex_key = self.player_skin_key(block);
             if !self.dynamic_textures.contains_key(&tex_key) {
                 if let Some(skin) = self.resolve_player_skin(block) {
                     self.dynamic_textures.insert(tex_key.clone(), skin);
@@ -819,7 +819,7 @@ impl<'a> MeshBuilder<'a> {
 
         // Player riders use the dynamic-skin path; other mobs use the standard one.
         if matches!(rider_type, entity::MobType::Player) {
-            let tex_key = Self::player_skin_key(&rider_block);
+            let tex_key = self.player_skin_key(&rider_block);
             if !self.dynamic_textures.contains_key(&tex_key) {
                 if let Some(skin) = self.resolve_player_skin(&rider_block) {
                     self.dynamic_textures.insert(tex_key.clone(), skin);
@@ -1241,9 +1241,11 @@ impl<'a> MeshBuilder<'a> {
         Ok(())
     }
 
-    /// Dynamic-texture key for a player's skin: shared by every head, player
-    /// and rider wearing the same skin.
-    fn player_skin_key(block: &InputBlock) -> String {
+    /// Dynamic-texture key for a player's skin, shared by every head, player
+    /// and rider wearing the same skin. Inline skins hash their data; pack
+    /// skins are `_skin/pack/<resource location actually used>`, so a caller
+    /// building a shared atlas can find the texture by stripping the prefix.
+    fn player_skin_key(&self, block: &InputBlock) -> String {
         use std::hash::{Hash, Hasher};
         for key in ["skin_base64", "skin"] {
             if let Some(data) = block.properties.get(key) {
@@ -1252,19 +1254,28 @@ impl<'a> MeshBuilder<'a> {
                 return format!("_skin/inline/{:016x}", h.finish());
             }
         }
-        if let Some(path) = block.properties.get("skin_texture") {
-            return format!("_skin/pack/{path}");
-        }
-        format!("_skin/pack/{}", entity::skull::player_skin_fallback_path(block))
+        format!("_skin/pack/{}", self.player_skin_pack_path(block))
     }
 
-    /// Resolve a player's skin texture, in order:
-    /// 1. `skin_base64`: base64 PNG bytes (the WASM/JS-friendly path);
-    /// 2. `skin`: hex PNG bytes;
-    /// 3. `skin_texture`: a texture already in the resource pack, e.g. one a
-    ///    caller registered for a downloaded skin, or a profile's `texture` override;
-    /// 4. vanilla's default skin for `uuid` (wide Steve without one), then Steve
-    ///    under its pre-1.19.3 path for old packs.
+    /// The resource-pack texture a player's skin comes from when it has no
+    /// inline skin: `skin_texture` if the pack has it (a skin the caller
+    /// registered, or a profile's `texture` override), else vanilla's default
+    /// skin for `uuid` (wide Steve without one), else Steve under its
+    /// pre-1.19.3 path for old packs.
+    fn player_skin_pack_path<'b>(&self, block: &'b InputBlock) -> &'b str {
+        let explicit = block.properties.get("skin_texture").map(String::as_str);
+        let default = entity::skull::player_skin_fallback_path(block);
+        explicit
+            .into_iter()
+            .chain(std::iter::once(default))
+            .chain(entity::skull::PLAYER_SKIN_LAST_RESORTS)
+            .find(|path| self.resource_pack.get_texture(path).is_some())
+            .unwrap_or(default)
+    }
+
+    /// Resolve a player's skin texture: `skin_base64` (base64 PNG, the
+    /// WASM/JS-friendly path), then `skin` (hex PNG), then
+    /// [`player_skin_pack_path`](Self::player_skin_pack_path).
     fn resolve_player_skin(&self, block: &InputBlock) -> Option<TextureData> {
         if let Some(t) = block.properties.get("skin_base64").and_then(|s| entity::skull::decode_base64_skin(s)) {
             return Some(t);
@@ -1272,14 +1283,7 @@ impl<'a> MeshBuilder<'a> {
         if let Some(t) = block.properties.get("skin").and_then(|s| entity::skull::decode_hex_skin(s)) {
             return Some(t);
         }
-        let explicit = block.properties.get("skin_texture").map(String::as_str);
-        let default = entity::skull::player_skin_fallback_path(block);
-        explicit
-            .into_iter()
-            .chain(std::iter::once(default))
-            .chain(entity::skull::PLAYER_SKIN_LAST_RESORTS)
-            .find_map(|path| self.resource_pack.get_texture(path))
-            .cloned()
+        self.resource_pack.get_texture(self.player_skin_pack_path(block)).cloned()
     }
 
     /// Add player head entity with skin texture support.
@@ -1289,7 +1293,7 @@ impl<'a> MeshBuilder<'a> {
         block: &InputBlock,
     ) -> Result<()> {
         // One atlas entry per distinct skin, not per head.
-        let tex_key = Self::player_skin_key(block);
+        let tex_key = self.player_skin_key(block);
         if !self.dynamic_textures.contains_key(&tex_key) {
             if let Some(skin) = self.resolve_player_skin(block) {
                 self.dynamic_textures.insert(tex_key.clone(), skin);
