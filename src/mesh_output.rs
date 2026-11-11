@@ -491,16 +491,16 @@ mod tests {
         mesh.add_triangle(v0, v1, v2);
 
         let mesher_output = crate::mesher::MesherOutput {
-            opaque_mesh: mesh,
-            cutout_mesh: Mesh::new(),
-            transparent_mesh: Mesh::new(),
+            opaque_mesh: crate::mesh_output::mesh_to_layer(&mesh),
+            cutout_mesh: crate::mesh_output::MeshLayer::new(),
+            transparent_mesh: crate::mesh_output::MeshLayer::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [1.0, 0.0, 1.0]),
             greedy_materials: Vec::new(),
             animated_textures: Vec::new(),
         };
 
-        let output = MeshOutput::from(&mesher_output);
+        let output = MeshOutput::from(mesher_output);
         let glb = output.to_glb().unwrap();
         assert!(!glb.is_empty());
         assert_eq!(&glb[0..4], b"glTF");
@@ -536,9 +536,9 @@ mod tests {
         };
 
         crate::mesher::MesherOutput {
-            opaque_mesh,
-            cutout_mesh: Mesh::new(),
-            transparent_mesh: Mesh::new(),
+            opaque_mesh: crate::mesh_output::mesh_to_layer(&opaque_mesh),
+            cutout_mesh: crate::mesh_output::MeshLayer::new(),
+            transparent_mesh: crate::mesh_output::MeshLayer::new(),
             atlas: TextureAtlas::empty(),
             bounds: BoundingBox::new([0.0, 0.0, 0.0], [11.0, 0.0, h.max(1.0)]),
             greedy_materials: vec![greedy],
@@ -554,7 +554,7 @@ mod tests {
     #[test]
     fn greedy_tile_uvs_do_not_leak_into_opaque_layer() {
         let mesher_output = build_mesher_output_with_greedy(5.0, 3.0);
-        let output = MeshOutput::from(&mesher_output);
+        let output = MeshOutput::from(mesher_output);
 
         for &[u, v] in &output.opaque.uvs {
             assert!(
@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn greedy_materials_survive_meshoutput_from() {
         let mesher_output = build_mesher_output_with_greedy(2.0, 2.0);
-        let output = MeshOutput::from(&mesher_output);
+        let output = MeshOutput::from(mesher_output);
 
         assert_eq!(
             output.greedy_materials.len(),
@@ -587,7 +587,7 @@ mod tests {
     #[test]
     fn greedy_materials_survive_mesher_output_roundtrip() {
         let mesher_output = build_mesher_output_with_greedy(2.0, 2.0);
-        let output = MeshOutput::from(&mesher_output);
+        let output = MeshOutput::from(mesher_output);
         let roundtripped = output.to_mesher_output();
 
         assert_eq!(
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn to_glb_emits_separate_primitive_for_each_greedy_material() {
         let mesher_output = build_mesher_output_with_greedy(2.0, 2.0);
-        let output = MeshOutput::from(&mesher_output);
+        let output = MeshOutput::from(mesher_output);
         let glb = output.to_glb().expect("export glb");
 
         // Parse the GLB JSON chunk to count primitives.
