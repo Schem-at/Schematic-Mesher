@@ -1749,10 +1749,10 @@ impl<'a> MeshBuilder<'a> {
         let (positions, uvs) = self.generate_face_vertices(direction, from, to, uv, face.rotation);
 
         // Apply element rotation if present
-        let positions = if let Some(rot) = &element.rotation {
-            self.apply_element_rotation(&positions, rot)
+        let (positions, normal) = if let Some(rot) = &element.rotation {
+            (self.apply_element_rotation(&positions, rot), Self::rotate_element_normal(normal, rot))
         } else {
-            positions
+            (positions, normal)
         };
 
         // Apply block transform rotation
@@ -1926,48 +1926,39 @@ impl<'a> MeshBuilder<'a> {
         rotation: &crate::types::ElementRotation,
     ) -> [[f32; 3]; 4] {
         let origin = rotation.normalized_origin();
-        let angle = rotation.angle_radians();
-        let rescale = rotation.rescale_factor();
-
-        let rotation_matrix = match rotation.axis {
-            crate::types::Axis::X => Mat3::from_rotation_x(angle),
-            crate::types::Axis::Y => Mat3::from_rotation_y(angle),
-            crate::types::Axis::Z => Mat3::from_rotation_z(angle),
-        };
+        // Vanilla's element transform is `R * S`: rescale in the element's own
+        // frame, then rotate. For a single-axis rotation S is uniform in the
+        // rotation plane, so this equals the old rotate-then-scale.
+        let transform: Mat3 = rotation.rotation_matrix() * Mat3::from_diagonal(rotation.rescale_vector());
 
         let mut result = [[0.0; 3]; 4];
         for (i, pos) in positions.iter().enumerate() {
-            // Translate to origin
             let p = Vec3::new(pos[0] - origin[0], pos[1] - origin[1], pos[2] - origin[2]);
-
-            // Rotate
-            let rotated = rotation_matrix * p;
-
-            // Rescale if needed
-            let scaled = if rescale != 1.0 {
-                match rotation.axis {
-                    crate::types::Axis::X => {
-                        Vec3::new(rotated.x, rotated.y * rescale, rotated.z * rescale)
-                    }
-                    crate::types::Axis::Y => {
-                        Vec3::new(rotated.x * rescale, rotated.y, rotated.z * rescale)
-                    }
-                    crate::types::Axis::Z => {
-                        Vec3::new(rotated.x * rescale, rotated.y * rescale, rotated.z)
-                    }
-                }
-            } else {
-                rotated
-            };
-
-            // Translate back
-            result[i] = [
-                scaled.x + origin[0],
-                scaled.y + origin[1],
-                scaled.z + origin[2],
-            ];
+            let t = transform * p;
+            result[i] = [t.x + origin[0], t.y + origin[1], t.z + origin[2]];
         }
         result
+    }
+
+    /// Rotate a face normal by an element rotation and keep the face's own
+    /// direction unless the rotation turned it to face another axis outright,
+    /// like vanilla `FaceBakery.calculateFacing`. Rotations up to 45° (the only
+    /// kind before 1.21.11) leave the normal unchanged; a 180° Euler flip
+    /// turns an `up` face into a `down` one.
+    fn rotate_element_normal(normal: [f32; 3], rotation: &crate::types::ElementRotation) -> [f32; 3] {
+        let n = Vec3::from(normal);
+        let r = rotation.rotation_matrix() * n;
+        let own = r.dot(n);
+        let mut best = n;
+        let mut best_dot = own;
+        for axis in [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z] {
+            let d = r.dot(axis);
+            if d > best_dot + 1e-4 {
+                best = axis;
+                best_dot = d;
+            }
+        }
+        best.to_array()
     }
 
     /// Apply block-level transform to positions.
@@ -2859,12 +2850,12 @@ mod tests {
         let element = ModelElement {
             from: [0.0, 0.0, 0.0],
             to: [16.0, 16.0, 16.0],
-            rotation: Some(crate::types::ElementRotation {
-                origin: [8.0, 8.0, 8.0],
-                axis: crate::types::Axis::Y,
-                angle: 22.5,
-                rescale: false,
-            }),
+            rotation: Some(crate::types::ElementRotation::single_axis(
+                [8.0, 8.0, 8.0],
+                crate::types::Axis::Y,
+                22.5,
+                false,
+            )),
             shade: true,
             faces: HashMap::new(),
         };

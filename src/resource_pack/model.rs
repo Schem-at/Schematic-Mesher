@@ -284,6 +284,67 @@ mod tests {
         assert_eq!(rotation.origin, [8.0, 8.0, 8.0]);
         assert_eq!(rotation.angle, 45.0);
         assert!(rotation.rescale);
+        assert!(rotation.euler.is_none());
+    }
+
+    /// Minecraft 1.21.11 added `x`/`y`/`z` Euler rotations (issue Schem-at/Nucleation#64).
+    /// This is the element from vanilla-style `template_hanging_sign_rot_3`.
+    #[test]
+    fn test_parse_element_with_euler_rotation() {
+        let json = r#"{
+            "from": [0, 0, 0],
+            "to": [16, 16, 16],
+            "rotation": {"x": 180, "y": -67.5, "z": -180, "origin": [8, 0, 8]},
+            "faces": {}
+        }"#;
+        let element: ModelElement = serde_json::from_str(json).unwrap();
+        let rotation = element.rotation.unwrap();
+        assert_eq!(rotation.origin, [8.0, 0.0, 8.0]);
+        assert_eq!(rotation.euler, Some([180.0, -67.5, -180.0]));
+        assert!(!rotation.rescale);
+    }
+
+    #[test]
+    fn test_euler_rotation_axes_default_to_zero() {
+        let rotation: crate::types::ElementRotation =
+            serde_json::from_str(r#"{"y": 90}"#).unwrap();
+        assert_eq!(rotation.euler, Some([0.0, 90.0, 0.0]));
+        assert_eq!(rotation.origin, [8.0, 8.0, 8.0]);
+    }
+
+    #[test]
+    fn test_rotation_without_axis_or_angles_is_rejected() {
+        assert!(serde_json::from_str::<crate::types::ElementRotation>(r#"{"origin": [8, 8, 8]}"#).is_err());
+        assert!(serde_json::from_str::<crate::types::ElementRotation>(r#"{"axis": "y"}"#).is_err());
+    }
+
+    #[test]
+    fn test_rotation_round_trips_both_forms() {
+        for json in [
+            r#"{"origin":[8.0,8.0,8.0],"axis":"y","angle":22.5}"#,
+            r#"{"origin":[8.0,0.0,8.0],"x":180.0,"y":-67.5,"z":-180.0}"#,
+        ] {
+            let r: crate::types::ElementRotation = serde_json::from_str(json).unwrap();
+            let back = serde_json::to_string(&r).unwrap();
+            assert_eq!(back, json);
+        }
+    }
+
+    /// Vanilla applies X, then Y, then Z (`Matrix4f.rotationZYX(z, y, x)`).
+    #[test]
+    fn test_euler_rotation_order_is_x_then_y_then_z() {
+        let r = crate::types::ElementRotation::euler_xyz([8.0; 3], 90.0, 90.0, 0.0, false);
+        let v = r.rotation_matrix() * glam::Vec3::Y;
+        // X by 90 takes +Y to +Z; Y by 90 then takes +Z to +X.
+        assert!((v - glam::Vec3::X).length() < 1e-5, "got {v:?}");
+    }
+
+    #[test]
+    fn test_single_axis_rescale_matches_inverse_cosine() {
+        let r = crate::types::ElementRotation::single_axis([8.0; 3], crate::types::Axis::Y, 22.5, true);
+        let s = r.rescale_vector();
+        let expected = 1.0 / 22.5f32.to_radians().cos();
+        assert!((s.x - expected).abs() < 1e-5 && (s.y - 1.0).abs() < 1e-6 && (s.z - expected).abs() < 1e-5);
     }
 
     #[test]
